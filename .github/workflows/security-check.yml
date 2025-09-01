@@ -1,0 +1,119 @@
+name: Security Check
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  security-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Check for sensitive files
+      run: |
+        echo "🔒 Checking for sensitive files..."
+        
+        # Check if any sensitive files are being committed
+        sensitive_files=(".env" "credentials.json" "token.json" "*.key" "*.pem")
+        found_sensitive=false
+        
+        for pattern in "${sensitive_files[@]}"; do
+          if git ls-files | grep -q "$pattern"; then
+            echo "❌ Found sensitive file: $pattern"
+            found_sensitive=true
+          fi
+        done
+        
+        if [ "$found_sensitive" = true ]; then
+          echo "❌ Sensitive files found in repository!"
+          echo "Please remove these files and ensure they are in .gitignore"
+          exit 1
+        fi
+        
+        echo "✅ No sensitive files found in repository"
+        
+    - name: Check .gitignore
+      run: |
+        echo "🔒 Checking .gitignore configuration..."
+        
+        if [ ! -f .gitignore ]; then
+          echo "❌ .gitignore file not found"
+          exit 1
+        fi
+        
+        required_patterns=(".env" "credentials.json" "token.json")
+        missing_patterns=false
+        
+        for pattern in "${required_patterns[@]}"; do
+          if ! grep -q "$pattern" .gitignore; then
+            echo "❌ .gitignore missing pattern: $pattern"
+            missing_patterns=true
+          fi
+        done
+        
+        if [ "$missing_patterns" = true ]; then
+          echo "❌ .gitignore needs configuration"
+          exit 1
+        fi
+        
+        echo "✅ .gitignore properly configured"
+        
+    - name: Check environment variables
+      run: |
+        echo "🔒 Checking environment variable usage..."
+        
+        # Check if any hardcoded API keys or URLs are in the code
+        if grep -r "sk-" . --include="*.py" --include="*.md" --include="*.txt"; then
+          echo "❌ Found potential API key in code"
+          exit 1
+        fi
+        
+        if grep -r "AIza" . --include="*.py" --include="*.md" --include="*.txt"; then
+          echo "❌ Found potential Google API key in code"
+          exit 1
+        fi
+        
+        echo "✅ No hardcoded API keys found"
+        
+    - name: Run basic tests
+      run: |
+        echo "🧪 Running basic tests..."
+        
+        # Test that the script can be imported without errors
+        python -c "import gmail_categorizer; print('✅ Script imports successfully')"
+        
+        # Test that environment variables are properly handled
+        python -c "
+        import os
+        os.environ['LLM_PROVIDER'] = 'test'
+        os.environ['OPENAI_API_KEY'] = 'test_key'
+        import gmail_categorizer
+        print('✅ Environment variables handled correctly')
+        "
+        
+    - name: Check for debug statements
+      run: |
+        echo "🔍 Checking for debug statements..."
+        
+        # Look for print statements that might leak information
+        if grep -r "print.*password\|print.*key\|print.*token" . --include="*.py"; then
+          echo "⚠️  Found potential debug statements that might leak sensitive info"
+          echo "Consider removing or securing these before production use"
+        fi
+        
+        echo "✅ Debug statement check complete" 
