@@ -127,7 +127,7 @@ PROMPT_RULES = (
     "Be conservative and only pick 'political' if clearly political."
 )
 
-def call_openai_classifier(subject: str, body: str, sender: str) -> Dict[str, Any]:
+def call_openai_classifier(subject: str, body: str, sender: str, verbose: bool = False) -> Dict[str, Any]:
     if not OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not set. Put it in .env or environment.")
 
@@ -150,7 +150,9 @@ def call_openai_classifier(subject: str, body: str, sender: str) -> Dict[str, An
         data = {"category": "none", "reason": "parse_error", "confidence": 0.0}
     return data
 
-def call_ollama_classifier(subject: str, body: str, sender: str) -> Dict[str, Any]:
+def call_ollama_classifier(subject: str, body: str, sender: str, verbose: bool = False) -> Dict[str, Any]:
+    start_time = time.time()
+    
     payload = {
         "model": OLLAMA_MODEL,
         "messages": [
@@ -159,26 +161,37 @@ def call_ollama_classifier(subject: str, body: str, sender: str) -> Dict[str, An
         ],
         "temperature": 0
     }
+    
     r = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT_SEC)
     r.raise_for_status()
     
-    print(f"DEBUG: Ollama HTTP status: {r.status_code}")
-    print(f"DEBUG: Ollama response headers: {dict(r.headers)}")
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
+    if verbose:
+        print(f"DEBUG: Ollama HTTP status: {r.status_code}")
+        print(f"DEBUG: Ollama response headers: {dict(r.headers)}")
+        print(f"DEBUG: Ollama request time: {elapsed_time:.3f}s")
     
     # Handle streaming NDJSON response from Ollama
     if r.headers.get('Content-Type') == 'application/x-ndjson':
         # Parse streaming response line by line
         content = ""
         final_content = ""
+        total_tokens = 0
+        
         for line in r.text.strip().split('\n'):
             if not line.strip():
                 continue
             try:
                 chunk = json.loads(line)
                 if chunk.get('done', False):
-                    # Final chunk, extract the complete content
+                    # Final chunk, extract the complete content and token count
                     if 'message' in chunk and 'content' in chunk['message']:
                         final_content = chunk['message']['content']
+                        # Extract token count if available
+                        if 'usage' in chunk and 'total_tokens' in chunk['usage']:
+                            total_tokens = chunk['usage']['total_tokens']
                         break
                 elif 'message' in chunk and 'content' in chunk['message']:
                     # Accumulate content from streaming chunks
@@ -191,7 +204,8 @@ def call_ollama_classifier(subject: str, body: str, sender: str) -> Dict[str, An
         # Use final_content if available, otherwise use accumulated content
         if final_content:
             content = final_content
-            print(f"DEBUG: Using final_content: {repr(final_content)}")
+            if verbose:
+                print(f"DEBUG: Using final_content: {repr(final_content)}")
         elif not content:
             # If no content was found, try to extract from the last chunk
             lines = r.text.strip().split('\n')
@@ -200,18 +214,25 @@ def call_ollama_classifier(subject: str, body: str, sender: str) -> Dict[str, An
                     last_chunk = json.loads(lines[-1])
                     if 'message' in last_chunk and 'content' in last_chunk['message']:
                         content = last_chunk['message']['content']
-                        print(f"DEBUG: Using last chunk content: {repr(content)}")
+                        if verbose:
+                            print(f"DEBUG: Using last chunk content: {repr(content)}")
                 except json.JSONDecodeError:
                     pass
         
-        print(f"DEBUG: Final extracted content: {repr(content)}")
-        print(f"DEBUG: Content length: {len(content)}")
+        if verbose:
+            print(f"DEBUG: Final extracted content: {repr(content)}")
+            print(f"DEBUG: Content length: {len(content)}")
+            if total_tokens > 0:
+                tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
+                print(f"DEBUG: Total tokens: {total_tokens}")
+                print(f"DEBUG: Tokens/second: {tokens_per_second:.2f}")
         
         if content:
             try:
                 return json.loads(content)
             except json.JSONDecodeError as e:
-                print(f"DEBUG: JSON parse error: {e}")
+                if verbose:
+                    print(f"DEBUG: JSON parse error: {e}")
                 # Try to extract JSON from content that might have extra text
                 if "Extra data" in str(e):
                     # Look for JSON content between curly braces
@@ -220,7 +241,8 @@ def call_ollama_classifier(subject: str, body: str, sender: str) -> Dict[str, An
                     if json_match:
                         try:
                             json_content = json_match.group(0)
-                            print(f"DEBUG: Extracted JSON: {json_content}")
+                            if verbose:
+                                print(f"DEBUG: Extracted JSON: {json_content}")
                             return json.loads(json_content)
                         except json.JSONDecodeError:
                             pass
@@ -231,19 +253,22 @@ def call_ollama_classifier(subject: str, body: str, sender: str) -> Dict[str, An
     try:
         j = r.json()
     except json.JSONDecodeError as e:
-        print(f"DEBUG: Ollama API returned malformed JSON: {e}")
-        print(f"DEBUG: Raw response text: {repr(r.text)}")
+        if verbose:
+            print(f"DEBUG: Ollama API returned malformed JSON: {e}")
+            print(f"DEBUG: Raw response text: {repr(r.text)}")
         return {"category": "none", "reason": "api_json_error", "confidence": 0.0}
     
     # Chat Completions API returns the same structure as OpenAI
     if "choices" in j and len(j["choices"]) > 0:
         content = j["choices"][0].get("message", {}).get("content", "")
         if content:
-            print(f"DEBUG: Raw Ollama response: {repr(content)}")
+            if verbose:
+                print(f"DEBUG: Raw Ollama response: {repr(content)}")
             try:
                 return json.loads(content)
             except json.JSONDecodeError as e:
-                print(f"DEBUG: JSON parse error: {e}")
+                if verbose:
+                    print(f"DEBUG: JSON parse error: {e}")
                 # Try to extract JSON from content that might have extra text
                 if "Extra data" in str(e):
                     # Look for JSON content between curly braces
@@ -252,7 +277,8 @@ def call_ollama_classifier(subject: str, body: str, sender: str) -> Dict[str, An
                     if json_match:
                         try:
                             json_content = json_match.group(0)
-                            print(f"DEBUG: Extracted JSON: {json_content}")
+                            if verbose:
+                                print(f"DEBUG: Extracted JSON: {json_content}")
                             return json.loads(json_content)
                         except json.JSONDecodeError:
                             pass
@@ -282,10 +308,10 @@ def extract_category_fallback(content: str) -> Dict[str, Any]:
     
     return {"category": "none", "reason": "fallback_no_match", "confidence": 0.0}
 
-def call_llm_classifier(subject: str, body: str, sender: str) -> Dict[str, Any]:
+def call_llm_classifier(subject: str, body: str, sender: str, verbose: bool = False) -> Dict[str, Any]:
     provider = LLM_PROVIDER
     if provider == "ollama":
-        return call_ollama_classifier(subject, body, sender)
+        return call_ollama_classifier(subject, body, sender, verbose)
     return call_openai_classifier(subject, body, sender)
 
 def ensure_labels_map(svc, want_names):
@@ -302,7 +328,7 @@ def label_thread(svc, thread_id: str, add_label_ids):
     body = {"addLabelIds": add_label_ids, "removeLabelIds": []}
     return svc.users().threads().modify(userId='me', id=thread_id, body=body).execute()
 
-def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY):
+def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbose=False):
     svc = gmail_service()
     want_labels = [LABEL_ECOMMERCE, LABEL_POLITICAL, LABEL_TRIAGED]
     labels_map = ensure_labels_map(svc, want_labels)
@@ -328,7 +354,7 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY):
             text = extract_text_from_payload(payload) or ""
             snippet = safe_snippet(text, 4000)
 
-            result = call_llm_classifier(subject, snippet, sender)
+            result = call_llm_classifier(subject, snippet, sender, verbose)
             category = (result.get("category") or "none").lower()
             confidence = float(result.get("confidence", 0))
             reason = result.get("reason", "")
@@ -360,9 +386,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Don't apply labels, just print decisions")
     ap.add_argument("--max", type=int, default=MAX_RESULTS, help="Max threads per run")
     ap.add_argument("--query", type=str, default=DEFAULT_QUERY, help="Gmail search query")
+    ap.add_argument("--verbose", action="store_true", help="Enable verbose output for LLM calls")
     args = ap.parse_args()
 
-    run_once(dry_run=args.dry_run, max_results=args.max, query=args.query)
+    run_once(dry_run=args.dry_run, max_results=args.max, query=args.query, verbose=args.verbose)
 
 if __name__ == "__main__":
     main()
