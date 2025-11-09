@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  # Ollama - Local LLM inference server
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mailtagger-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Uncomment for AMD GPU support (ROCm)
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+    # environment:
+    #   - HSA_OVERRIDE_GFX_VERSION=10.3.0  # Adjust for your GPU
+
+  # Mailtagger - Gmail categorizer
+  mailtagger:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mailtagger-app
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      # LLM Provider Configuration
+      - LLM_PROVIDER=ollama
+      - OLLAMA_URL=http://ollama:11434/v1/chat/completions
+      - OLLAMA_MODEL=llama3.1:8b
+      
+      # OpenAI Configuration (alternative)
+      # - LLM_PROVIDER=openai
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # - OPENAI_MODEL=gpt-4o-mini
+      
+      # Gmail Labels
+      - LABEL_ECOMMERCE=AI_Ecommerce
+      - LABEL_POLITICAL=AI_Political
+      - LABEL_TRIAGED=AI_Triaged
+      
+      # Gmail Query
+      - GMAIL_QUERY=in:inbox newer_than:14d -label:AI_Triaged
+      
+      # Processing Settings
+      - MAX_RESULTS=40
+      - SLEEP_SECONDS=0.5
+      
+      # Daemon Settings
+      - DAEMON_INTERVAL=300
+      - CREDENTIALS_PATH=/app/data
+      
+      # Logging
+      - LOG_LEVEL=INFO
+      
+      # Retry Settings
+      - MAX_RETRIES=3
+      - RETRY_BACKOFF=2.0
+      - OPENAI_TIMEOUT=45
+    
+    volumes:
+      # Mount credentials directory
+      # IMPORTANT: Place credentials.json and token.json in ./data/ before starting
+      - ./data:/app/data:rw
+    
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    # Uncomment to override command (e.g., for different interval)
+    # command: ["python3", "gmail_categorizer.py", "--daemon", "--credentials-path", "/app/data", "--interval", "600"]
+
+volumes:
+  # Persistent storage for Ollama models
+  ollama-models:
+    driver: local
+
+# Optional: Custom network
+networks:
+  default:
+    name: mailtagger-network
+
