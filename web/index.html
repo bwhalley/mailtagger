@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mailtagger Prompt Manager</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📧 Mailtagger Prompt Manager</h1>
+            <p class="subtitle">Manage and test your email classification prompts</p>
+        </header>
+
+        <!-- Tab Navigation -->
+        <nav class="tabs">
+            <button class="tab-button active" onclick="showTab('edit')">
+                ✏️ Edit Prompt
+            </button>
+            <button class="tab-button" onclick="showTab('test')">
+                🧪 Test
+            </button>
+            <button class="tab-button" onclick="showTab('stats')">
+                📊 Statistics
+            </button>
+        </nav>
+
+        <!-- Edit Tab -->
+        <div id="edit-tab" class="tab-content active">
+            <div class="card">
+                <h2>Edit Classification Prompt</h2>
+                <div class="form-group">
+                    <label for="prompt-name">Prompt Name:</label>
+                    <input type="text" id="prompt-name" placeholder="e.g., Enhanced Classifier v2">
+                </div>
+                <div class="form-group">
+                    <label for="prompt-content">Prompt Content:</label>
+                    <textarea 
+                        id="prompt-content" 
+                        placeholder="Enter your classification prompt here..."
+                        rows="20"
+                    ></textarea>
+                    <p class="help-text">
+                        The prompt should instruct the LLM to classify emails into: 
+                        <code>ecommerce</code>, <code>political</code>, or <code>none</code>
+                    </p>
+                </div>
+                <div class="button-group">
+                    <button class="button button-primary" onclick="savePrompt()">
+                        💾 Save & Activate
+                    </button>
+                    <button class="button" onclick="loadPrompt()">
+                        🔄 Reload
+                    </button>
+                </div>
+                <div id="save-status"></div>
+            </div>
+        </div>
+
+        <!-- Test Tab -->
+        <div id="test-tab" class="tab-content">
+            <div class="card">
+                <h2>Test Prompt on Real Emails</h2>
+                <div class="test-config">
+                    <div class="form-group inline">
+                        <label for="email-count">Number of emails:</label>
+                        <input type="number" id="email-count" value="10" min="1" max="50">
+                    </div>
+                    <div class="form-group inline">
+                        <label for="test-query">Gmail Query:</label>
+                        <input type="text" id="test-query" placeholder="in:inbox newer_than:7d">
+                        <p class="help-text-small">Leave empty to use default</p>
+                    </div>
+                    <button class="button button-primary" onclick="runTest()">
+                        🧪 Run Test
+                    </button>
+                </div>
+
+                <div id="test-loading" class="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>Testing prompt on emails... This may take a minute.</p>
+                </div>
+
+                <div id="test-results"></div>
+            </div>
+        </div>
+
+        <!-- Stats Tab -->
+        <div id="stats-tab" class="tab-content">
+            <div class="card">
+                <h2>Performance Statistics</h2>
+                <div class="form-group inline">
+                    <label for="stats-days">Time period:</label>
+                    <select id="stats-days" onchange="loadStats()">
+                        <option value="1">Last 24 hours</option>
+                        <option value="7" selected>Last 7 days</option>
+                        <option value="30">Last 30 days</option>
+                    </select>
+                    <button class="button button-small" onclick="loadStats()">
+                        🔄 Refresh
+                    </button>
+                </div>
+                
+                <div id="stats-loading" class="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>Loading statistics...</p>
+                </div>
+
+                <div id="stats-display"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
+
