@@ -219,8 +219,39 @@ def gmail_service() -> Any:
             
             logger.info("Starting OAuth flow...")
             flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
-            creds = flow.run_local_server(port=0)
-            logger.info("OAuth flow completed successfully")
+            
+            # Check if we're in a headless environment (Docker, no display, etc.)
+            is_headless = (
+                not os.getenv('DISPLAY') or  # No X11 display
+                os.path.exists('/.dockerenv') or  # Docker container
+                os.getenv('DOCKER_CONTAINER') == 'true' or  # Explicit Docker flag
+                not os.getenv('TERM')  # No terminal (unlikely but possible)
+            )
+            
+            if is_headless:
+                # Use console flow for headless environments
+                logger.info("Detected headless environment, using console-based OAuth flow")
+                logger.info("=" * 80)
+                logger.info("Please visit the following URL to authorize the application:")
+                logger.info("=" * 80)
+                creds = flow.run_console()
+                logger.info("=" * 80)
+                logger.info("OAuth flow completed successfully")
+            else:
+                # Try to run local server (opens browser), fall back to console if it fails
+                try:
+                    creds = flow.run_local_server(port=0)
+                    logger.info("OAuth flow completed successfully")
+                except Exception as e:
+                    # If browser can't be opened, use console flow
+                    logger.warning(f"Could not open browser: {e}")
+                    logger.info("Falling back to console-based OAuth flow...")
+                    logger.info("=" * 80)
+                    logger.info("Please visit the following URL to authorize the application:")
+                    logger.info("=" * 80)
+                    creds = flow.run_console()
+                    logger.info("=" * 80)
+                    logger.info("OAuth flow completed successfully")
         
         # Save the credentials for the next run
         with open(token_path, 'w') as token:
@@ -296,6 +327,47 @@ PROMPT_RULES = (
     "Be conservative and only pick 'political' if clearly political."
 )
 
+def log_performance_metrics(provider: str, elapsed_time: float, total_tokens: int = 0, 
+                            prompt_tokens: int = 0, completion_tokens: int = 0, 
+                            verbose: bool = False) -> Dict[str, Any]:
+    """Log performance metrics in a consistent format. Returns metrics dict for aggregation."""
+    if not verbose:
+        return {}
+    
+    logger.info("=" * 60)
+    logger.info(f"LLM Performance Metrics ({provider})")
+    logger.info("=" * 60)
+    logger.info(f"  Total latency:     {elapsed_time:.3f}s")
+    
+    if total_tokens > 0:
+        tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
+        logger.info(f"  Total tokens:       {total_tokens:,}")
+        logger.info(f"  Throughput:         {tokens_per_second:.2f} tokens/sec")
+        
+        if prompt_tokens > 0 or completion_tokens > 0:
+            logger.info(f"  Prompt tokens:      {prompt_tokens:,}")
+            logger.info(f"  Completion tokens:  {completion_tokens:,}")
+            if prompt_tokens > 0:
+                prompt_time = elapsed_time * (prompt_tokens / total_tokens) if total_tokens > 0 else 0
+                completion_time = elapsed_time * (completion_tokens / total_tokens) if total_tokens > 0 else 0
+                logger.info(f"  Prompt time:        {prompt_time:.3f}s")
+                logger.info(f"  Generation time:    {completion_time:.3f}s")
+                if completion_tokens > 0:
+                    gen_speed = completion_tokens / completion_time if completion_time > 0 else 0
+                    logger.info(f"  Generation speed:   {gen_speed:.2f} tokens/sec")
+    else:
+        logger.info(f"  Token info:         Not available")
+    
+    logger.info("=" * 60)
+    
+    # Return metrics for aggregation
+    return {
+        'latency': elapsed_time,
+        'total_tokens': total_tokens,
+        'prompt_tokens': prompt_tokens,
+        'completion_tokens': completion_tokens
+    }
+
 def call_openai_classifier(subject: str, body: str, sender: str, verbose: bool = False) -> Dict[str, Any]:
     """Classify email using OpenAI API."""
     if not OPENAI_API_KEY:
@@ -322,13 +394,33 @@ def call_openai_classifier(subject: str, body: str, sender: str, verbose: bool =
         r.raise_for_status()
         elapsed = time.time() - start_time
         
-        content = r.json()["choices"][0]["message"]["content"]
+        response_json = r.json()
+        content = response_json["choices"][0]["message"]["content"]
+        
+        # Extract token usage if available
+        usage = response_json.get("usage", {})
+        total_tokens = usage.get("total_tokens", 0)
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        
+        # Log performance metrics and return for aggregation
+        metrics = log_performance_metrics(
+            provider="OpenAI",
+            elapsed_time=elapsed,
+            total_tokens=total_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            verbose=verbose
+        )
+        
         logger.debug(f"OpenAI response received in {elapsed:.2f}s")
         
         try:
             data = json.loads(content)
             if verbose:
                 logger.debug(f"Parsed result: {data}")
+                # Attach metrics to result for aggregation
+                data['_metrics'] = metrics
             return data
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse OpenAI response: {e}")
@@ -375,6 +467,9 @@ def call_ollama_classifier(subject: str, body: str, sender: str, verbose: bool =
         content = ""
         final_content = ""
         total_tokens = 0
+        prompt_tokens = 0
+        completion_tokens = 0
+        first_token_time = None
         
         for line in r.text.strip().split('\n'):
             if not line.strip():
@@ -385,11 +480,16 @@ def call_ollama_classifier(subject: str, body: str, sender: str, verbose: bool =
                     # Final chunk, extract the complete content and token count
                     if 'message' in chunk and 'content' in chunk['message']:
                         final_content = chunk['message']['content']
-                        # Extract token count if available
-                        if 'usage' in chunk and 'total_tokens' in chunk['usage']:
-                            total_tokens = chunk['usage']['total_tokens']
-                        break
+                    # Extract token count if available
+                    if 'usage' in chunk:
+                        total_tokens = chunk['usage'].get('total_tokens', 0)
+                        prompt_tokens = chunk['usage'].get('prompt_tokens', 0)
+                        completion_tokens = chunk['usage'].get('completion_tokens', 0)
+                    break
                 elif 'message' in chunk and 'content' in chunk['message']:
+                    # Track time to first token
+                    if first_token_time is None:
+                        first_token_time = time.time()
                     # Accumulate content from streaming chunks
                     chunk_content = chunk['message']['content']
                     if chunk_content:  # Only add non-empty content
@@ -415,17 +515,30 @@ def call_ollama_classifier(subject: str, body: str, sender: str, verbose: bool =
                 except json.JSONDecodeError:
                     pass
         
+        # Log performance metrics
+        metrics = log_performance_metrics(
+            provider="Ollama (streaming)",
+            elapsed_time=elapsed_time,
+            total_tokens=total_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            verbose=verbose
+        )
+        
+        if verbose and first_token_time:
+            time_to_first_token = first_token_time - start_time
+            logger.info(f"  Time to first token: {time_to_first_token:.3f}s")
+        
         if verbose:
             logger.debug(f"Final extracted content: {repr(content)}")
             logger.debug(f"Content length: {len(content)}")
-            if total_tokens > 0:
-                tokens_per_second = total_tokens / elapsed_time if elapsed_time > 0 else 0
-                logger.debug(f"Total tokens: {total_tokens}")
-                logger.debug(f"Tokens/second: {tokens_per_second:.2f}")
         
         if content:
             try:
-                return json.loads(content)
+                result = json.loads(content)
+                if verbose:
+                    result['_metrics'] = metrics
+                return result
             except json.JSONDecodeError as e:
                 if verbose:
                     logger.debug(f"JSON parse error: {e}")
@@ -457,11 +570,31 @@ def call_ollama_classifier(subject: str, body: str, sender: str, verbose: bool =
     # Chat Completions API returns the same structure as OpenAI
     if "choices" in j and len(j["choices"]) > 0:
         content = j["choices"][0].get("message", {}).get("content", "")
+        
+        # Extract token usage if available
+        usage = j.get("usage", {})
+        total_tokens = usage.get("total_tokens", 0)
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        
+        # Log performance metrics for non-streaming response
+        metrics = log_performance_metrics(
+            provider="Ollama (non-streaming)",
+            elapsed_time=elapsed_time,
+            total_tokens=total_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            verbose=verbose
+        )
+        
         if content:
             if verbose:
                 logger.debug(f"Raw Ollama response: {repr(content)}")
             try:
-                return json.loads(content)
+                result = json.loads(content)
+                if verbose:
+                    result['_metrics'] = metrics
+                return result
             except json.JSONDecodeError as e:
                 if verbose:
                     logger.debug(f"JSON parse error: {e}")
@@ -509,7 +642,7 @@ def call_llm_classifier(subject: str, body: str, sender: str, verbose: bool = Fa
     provider = LLM_PROVIDER
     if provider == "ollama":
         return call_ollama_classifier(subject, body, sender, verbose)
-    return call_openai_classifier(subject, body, sender)
+    return call_openai_classifier(subject, body, sender, verbose)
 
 def ensure_labels_map(svc, want_names):
     existing = svc.users().labels().list(userId='me').execute().get('labels', [])
@@ -532,6 +665,17 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
     logger.info(f"Starting email processing run (dry_run={dry_run}, max_results={max_results})")
     logger.debug(f"Query: {query}")
     
+    # Performance tracking
+    run_start_time = time.time()
+    performance_stats = {
+        'total_calls': 0,
+        'total_latency': 0.0,
+        'total_tokens': 0,
+        'total_prompt_tokens': 0,
+        'total_completion_tokens': 0,
+        'latencies': []
+    }
+    
     try:
         svc = gmail_service()
     except Exception as e:
@@ -545,7 +689,7 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
     except Exception as e:
         logger.error(f"Failed to ensure labels: {e}")
         return 0
-
+    
     try:
         threads = list_threads(svc, query, max_results)
     except HttpError as e:
@@ -585,6 +729,16 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
 
             logger.debug(f"Classifying: '{subject[:60]}...' from {sender}")
             result = call_llm_classifier(subject, snippet, sender, verbose)
+            
+            # Collect performance metrics if available (stored in result metadata)
+            if verbose and isinstance(result, dict) and '_metrics' in result:
+                metrics = result.pop('_metrics')  # Remove from result before processing
+                performance_stats['total_calls'] += 1
+                performance_stats['total_latency'] += metrics.get('latency', 0)
+                performance_stats['total_tokens'] += metrics.get('total_tokens', 0)
+                performance_stats['total_prompt_tokens'] += metrics.get('prompt_tokens', 0)
+                performance_stats['total_completion_tokens'] += metrics.get('completion_tokens', 0)
+                performance_stats['latencies'].append(metrics.get('latency', 0))
             category = (result.get("category") or "none").lower()
             confidence = float(result.get("confidence", 0))
             reason = result.get("reason", "")
@@ -623,7 +777,35 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
             logger.error(f"Unexpected error processing thread {tid}: {e}", exc_info=True)
             errors += 1
 
+    # Log aggregate performance statistics
+    run_elapsed = time.time() - run_start_time
     logger.info(f"Processing complete. Processed: {processed}, Errors: {errors}")
+    
+    if verbose and performance_stats['total_calls'] > 0:
+        avg_latency = performance_stats['total_latency'] / performance_stats['total_calls']
+        avg_tokens = performance_stats['total_tokens'] / performance_stats['total_calls'] if performance_stats['total_calls'] > 0 else 0
+        avg_throughput = performance_stats['total_tokens'] / performance_stats['total_latency'] if performance_stats['total_latency'] > 0 else 0
+        
+        logger.info("=" * 60)
+        logger.info("Run Performance Summary")
+        logger.info("=" * 60)
+        logger.info(f"  Total run time:        {run_elapsed:.2f}s")
+        logger.info(f"  LLM calls made:        {performance_stats['total_calls']}")
+        logger.info(f"  Total LLM latency:     {performance_stats['total_latency']:.2f}s")
+        logger.info(f"  Average latency:       {avg_latency:.3f}s per call")
+        if performance_stats['latencies']:
+            min_latency = min(performance_stats['latencies'])
+            max_latency = max(performance_stats['latencies'])
+            logger.info(f"  Latency range:         {min_latency:.3f}s - {max_latency:.3f}s")
+        logger.info(f"  Total tokens:          {performance_stats['total_tokens']:,}")
+        logger.info(f"  Average tokens/call:    {avg_tokens:.1f}")
+        logger.info(f"  Average throughput:     {avg_throughput:.2f} tokens/sec")
+        if performance_stats['total_prompt_tokens'] > 0:
+            logger.info(f"  Total prompt tokens:    {performance_stats['total_prompt_tokens']:,}")
+            logger.info(f"  Total completion tokens: {performance_stats['total_completion_tokens']:,}")
+        logger.info(f"  Emails per second:      {processed / run_elapsed:.2f}" if run_elapsed > 0 else "  Emails per second:      N/A")
+        logger.info("=" * 60)
+    
     return processed
 
 def run_daemon(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, 

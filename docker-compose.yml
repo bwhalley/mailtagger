@@ -1,34 +1,4 @@
-version: '3.8'
-
 services:
-  # Ollama - Local LLM inference server
-  ollama:
-    image: ollama/ollama:latest
-    container_name: mailtagger-ollama
-    restart: unless-stopped
-    volumes:
-      - ollama-models:/root/.ollama
-    ports:
-      - "11434:11434"
-    deploy:
-      resources:
-        limits:
-          memory: 8G
-        reservations:
-          memory: 4G
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    # Uncomment for AMD GPU support (ROCm)
-    # devices:
-    #   - /dev/kfd
-    #   - /dev/dri
-    # environment:
-    #   - HSA_OVERRIDE_GFX_VERSION=10.3.0  # Adjust for your GPU
-
   # Mailtagger - Gmail categorizer
   mailtagger:
     build:
@@ -36,13 +6,12 @@ services:
       dockerfile: Dockerfile
     container_name: mailtagger-app
     restart: unless-stopped
-    depends_on:
-      ollama:
-        condition: service_healthy
+    network_mode: host
     environment:
       # LLM Provider Configuration
+      # Using local Ollama instance running on host (via network_mode: host)
       - LLM_PROVIDER=ollama
-      - OLLAMA_URL=http://ollama:11434/v1/chat/completions
+      - OLLAMA_URL=http://localhost:11434/v1/chat/completions
       - OLLAMA_MODEL=llama3.1:8b
       
       # OpenAI Configuration (alternative)
@@ -96,18 +65,16 @@ services:
       dockerfile: Dockerfile.api
     container_name: mailtagger-api
     restart: unless-stopped
-    depends_on:
-      - ollama
-    ports:
-      - "8000:8000"
+    network_mode: host
     environment:
       - PROMPT_DB_PATH=/app/data/prompts.db
       - GMAIL_CREDENTIALS_PATH=/app/data
       - HOST=0.0.0.0
       - PORT=8000
       # LLM Configuration (for testing)
+      # Using local Ollama instance running on host (via network_mode: host)
       - LLM_PROVIDER=ollama
-      - OLLAMA_URL=http://ollama:11434/v1/chat/completions
+      - OLLAMA_URL=http://localhost:11434/v1/chat/completions
       - OLLAMA_MODEL=llama3.1:8b
       - CREDENTIALS_PATH=/app/data
     volumes:
@@ -124,8 +91,8 @@ services:
     image: nginx:alpine
     container_name: mailtagger-ui
     restart: unless-stopped
-    depends_on:
-      - prompt-api
+    # Note: depends_on removed because prompt-api uses network_mode: host
+    # The UI will connect to the API via browser (localhost:8000)
     ports:
       - "8080:80"
     volumes:
@@ -135,14 +102,3 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-
-volumes:
-  # Persistent storage for Ollama models
-  ollama-models:
-    driver: local
-
-# Optional: Custom network
-networks:
-  default:
-    name: mailtagger-network
-
