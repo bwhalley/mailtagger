@@ -75,7 +75,7 @@ services:
       # Using local Ollama instance running on host (via network_mode: host)
       - LLM_PROVIDER=ollama
       - OLLAMA_URL=http://localhost:11434/v1/chat/completions
-      - OLLAMA_MODEL=llama3.1:8b
+      - OLLAMA_MODEL=gpt-oss:20b
       - CREDENTIALS_PATH=/app/data
     volumes:
       - ./data:/app/data:rw
