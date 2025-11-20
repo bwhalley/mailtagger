@@ -422,11 +422,14 @@ async def start_oauth_flow(request: Request):
         )
     
     try:
-        # Determine redirect URI based on request origin
-        origin = request.headers.get('origin', '')
-        if origin:
-            # Use the actual origin (http or https)
-            redirect_uri = f"{origin}/api/oauth/callback"
+        # Determine redirect URI based on request headers
+        # Check X-Forwarded-Proto and X-Forwarded-Host first (set by nginx)
+        proto = request.headers.get('x-forwarded-proto', 'https')
+        host = request.headers.get('x-forwarded-host') or request.headers.get('host', '')
+        
+        if host and 'hanweir.146sharon.com' in host:
+            # Use the forwarded host (from nginx)
+            redirect_uri = f"{proto}://{host}/api/oauth/callback"
         else:
             # Fallback to configured value
             redirect_uri = OAUTH_REDIRECT_URI
@@ -495,10 +498,12 @@ async def oauth_callback(request: Request, code: Optional[str] = None, state: Op
             # Clean up state file
             state_path.unlink()
         
-        # Determine redirect URI
-        origin = request.headers.get('origin', '')
-        if origin:
-            redirect_uri = f"{origin}/api/oauth/callback"
+        # Determine redirect URI (must match what was used in start_oauth_flow)
+        proto = request.headers.get('x-forwarded-proto', 'https')
+        host = request.headers.get('x-forwarded-host') or request.headers.get('host', '')
+        
+        if host and 'hanweir.146sharon.com' in host:
+            redirect_uri = f"{proto}://{host}/api/oauth/callback"
         else:
             # Try to construct from request URL
             redirect_uri = str(request.url).split('?')[0]
