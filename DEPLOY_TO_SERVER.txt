@@ -1,0 +1,58 @@
+================================================================================
+                    DEPLOY HTTPS TO hanweir.146sharon.com
+================================================================================
+
+STEP 1: Copy files to your server
+----------------------------------
+
+From your local machine:
+
+cd /Users/brian/Downloads/mailtagger
+
+scp -r nginx-ssl.conf scripts HTTPS_SETUP.md QUICK_HTTPS_SETUP.md \
+    user@hanweir.146sharon.com:/opt/mailtagger/
+
+
+STEP 2: Run the automated setup
+--------------------------------
+
+SSH to your server:
+
+ssh user@hanweir.146sharon.com
+
+cd /opt/mailtagger
+sudo ./scripts/setup-https-server.sh hanweir.146sharon.com /opt/mailtagger
+
+
+STEP 3: Access your site
+-------------------------
+
+Open in browser:
+https://hanweir.146sharon.com
+
+Accept the certificate warning (one-time only)
+
+
+THAT'S IT! 🎉
+
+================================================================================
+
+WHAT IT DOES:
+- Generates self-signed SSL certificate (valid 365 days)
+- Installs and configures nginx with SSL
+- Sets up HTTP → HTTPS redirect
+- Configures reverse proxy for API
+- Opens firewall ports (80, 443)
+- Updates web UI to use HTTPS
+
+AFTER SETUP:
+- Main site: https://hanweir.146sharon.com
+- API health: https://hanweir.146sharon.com/health
+- All HTTP traffic redirects to HTTPS
+
+CHECK STATUS:
+sudo systemctl status nginx
+sudo tail -f /var/log/nginx/mailtagger_access.log
+
+================================================================================
+

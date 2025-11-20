@@ -21,13 +21,21 @@ function showTab(tabName) {
     
     // Show selected tab
     document.getElementById(`${tabName}-tab`).classList.add('active');
-    event.target.classList.add('active');
+    
+    // Find and activate the corresponding button
+    const clickedButton = event && event.target ? event.target : 
+        document.querySelector(`[onclick="showTab('${tabName}')"]`);
+    if (clickedButton) {
+        clickedButton.classList.add('active');
+    }
     
     // Load data for the tab
     if (tabName === 'edit') {
         loadPrompt();
     } else if (tabName === 'stats') {
         loadStats();
+    } else if (tabName === 'gmail') {
+        checkGmailStatus();
     }
 }
 
@@ -383,11 +391,192 @@ function escapeHtml(text) {
 }
 
 // ============================================================================
+// Gmail Authorization
+// ============================================================================
+
+async function checkGmailStatus() {
+    const statusContainer = document.getElementById('gmail-auth-status');
+    const loadingDiv = document.getElementById('gmail-status-loading');
+    const authorizeBtn = document.getElementById('authorize-button');
+    const revokeBtn = document.getElementById('revoke-button');
+    
+    loadingDiv.style.display = 'block';
+    statusContainer.innerHTML = '';
+    
+    try {
+        const response = await fetch(`${API_URL}/api/gmail/status`);
+        if (!response.ok) {
+            throw new Error('Failed to check Gmail status');
+        }
+        
+        const status = await response.json();
+        
+        // Display status
+        let html = '<div class="gmail-status">';
+        
+        if (status.authorized && status.token_valid) {
+            html += `
+                <div class="status status-success">
+                    <h3>✅ Gmail Authorized</h3>
+                    ${status.email ? `<p><strong>Account:</strong> ${status.email}</p>` : ''}
+                    <p>${status.message}</p>
+                </div>
+            `;
+            authorizeBtn.style.display = 'none';
+            revokeBtn.style.display = 'inline-block';
+        } else if (!status.credentials_exists) {
+            html += `
+                <div class="status status-error">
+                    <h3>❌ Credentials Not Found</h3>
+                    <p>${status.message}</p>
+                    <p><strong>Action needed:</strong> Please upload credentials.json to your server.</p>
+                    <p>See setup instructions below.</p>
+                </div>
+            `;
+            authorizeBtn.style.display = 'none';
+            revokeBtn.style.display = 'none';
+        } else {
+            html += `
+                <div class="status status-warning">
+                    <h3>⚠️ Not Authorized</h3>
+                    <p>${status.message}</p>
+                    <p><strong>Action needed:</strong> Click "Authorize Gmail" below.</p>
+                </div>
+            `;
+            authorizeBtn.style.display = 'inline-block';
+            revokeBtn.style.display = 'none';
+        }
+        
+        html += '</div>';
+        statusContainer.innerHTML = html;
+        
+    } catch (error) {
+        statusContainer.innerHTML = `
+            <div class="status status-error">
+                Error checking Gmail status: ${error.message}
+            </div>
+        `;
+        authorizeBtn.style.display = 'none';
+        revokeBtn.style.display = 'none';
+    } finally {
+        loadingDiv.style.display = 'none';
+    }
+}
+
+async function authorizeGmail() {
+    const actionStatus = document.getElementById('gmail-action-status');
+    
+    actionStatus.innerHTML = `
+        <div class="status status-info">
+            Starting authorization flow...
+        </div>
+    `;
+    
+    try {
+        const response = await fetch(`${API_URL}/api/oauth/start`);
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Failed to start OAuth flow');
+        }
+        
+        const data = await response.json();
+        
+        // Redirect to Google OAuth page
+        actionStatus.innerHTML = `
+            <div class="status status-success">
+                Redirecting to Google for authorization...
+            </div>
+        `;
+        
+        // Small delay so user sees the message
+        setTimeout(() => {
+            window.location.href = data.auth_url;
+        }, 500);
+        
+    } catch (error) {
+        actionStatus.innerHTML = `
+            <div class="status status-error">
+                Error starting authorization: ${error.message}
+                <br><br>
+                Make sure credentials.json exists and is properly configured.
+            </div>
+        `;
+    }
+}
+
+async function revokeGmail() {
+    if (!confirm('Are you sure you want to revoke Gmail authorization?')) {
+        return;
+    }
+    
+    const actionStatus = document.getElementById('gmail-action-status');
+    
+    try {
+        const response = await fetch(`${API_URL}/api/gmail/revoke`, {
+            method: 'POST'
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            actionStatus.innerHTML = `
+                <div class="status status-success">
+                    ${data.message}
+                </div>
+            `;
+            // Refresh status
+            setTimeout(checkGmailStatus, 1000);
+        } else {
+            actionStatus.innerHTML = `
+                <div class="status status-error">
+                    ${data.message}
+                </div>
+            `;
+        }
+        
+    } catch (error) {
+        actionStatus.innerHTML = `
+            <div class="status status-error">
+                Error revoking authorization: ${error.message}
+            </div>
+        `;
+    }
+}
+
+// ============================================================================
 // Initialization
 // ============================================================================
 
 // Load prompt on page load
 document.addEventListener('DOMContentLoaded', () => {
     loadPrompt();
+    
+    // Check for OAuth callback result
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.has('oauth_success')) {
+        // Show success message and switch to Gmail tab
+        showTab('gmail');
+        document.getElementById('gmail-action-status').innerHTML = `
+            <div class="status status-success">
+                ✅ Gmail authorization successful! You can now test emails.
+            </div>
+        `;
+        checkGmailStatus();
+        // Clean URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (urlParams.has('oauth_error')) {
+        // Show error message
+        const error = urlParams.get('oauth_error');
+        showTab('gmail');
+        document.getElementById('gmail-action-status').innerHTML = `
+            <div class="status status-error">
+                ❌ Gmail authorization failed: ${error}
+                <br>Please try again or check your credentials.json file.
+            </div>
+        `;
+        checkGmailStatus();
+        // Clean URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+    }
 });
 

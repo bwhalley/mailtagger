@@ -24,6 +24,9 @@
             <button class="tab-button" onclick="showTab('stats')">
                 📊 Statistics
             </button>
+            <button class="tab-button" onclick="showTab('gmail')">
+                🔐 Gmail Auth
+            </button>
         </nav>
 
         <!-- Edit Tab -->
@@ -108,6 +111,73 @@
                 </div>
 
                 <div id="stats-display"></div>
+            </div>
+        </div>
+
+        <!-- Gmail Auth Tab -->
+        <div id="gmail-tab" class="tab-content">
+            <div class="card">
+                <h2>Gmail Authorization</h2>
+                <p class="help-text">
+                    Mailtagger needs access to your Gmail account to read and label emails.
+                    Your credentials are stored securely on your server only.
+                </p>
+
+                <div id="gmail-status-loading" class="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>Checking authorization status...</p>
+                </div>
+
+                <div id="gmail-auth-status"></div>
+
+                <div class="button-group" style="margin-top: 20px;">
+                    <button class="button button-primary" id="authorize-button" onclick="authorizeGmail()" style="display: none;">
+                        🔐 Authorize Gmail
+                    </button>
+                    <button class="button button-danger" id="revoke-button" onclick="revokeGmail()" style="display: none;">
+                        🚫 Revoke Authorization
+                    </button>
+                    <button class="button" onclick="checkGmailStatus()">
+                        🔄 Refresh Status
+                    </button>
+                </div>
+
+                <div id="gmail-action-status" style="margin-top: 15px;"></div>
+
+                <div class="card" style="margin-top: 30px; background: #f8f9fa;">
+                    <h3>📋 Setup Instructions</h3>
+                    <ol style="line-height: 1.8;">
+                        <li>
+                            <strong>Create Google Cloud Project:</strong>
+                            <br>Go to <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a>
+                            and create a new project.
+                        </li>
+                        <li>
+                            <strong>Enable Gmail API:</strong>
+                            <br>In your project, go to "APIs & Services" → "Library" → Search "Gmail API" → Enable
+                        </li>
+                        <li>
+                            <strong>Create OAuth Credentials:</strong>
+                            <br>Go to "APIs & Services" → "Credentials" → "Create Credentials" → "OAuth client ID"
+                            <br>Application type: "Web application"
+                            <br>Authorized redirect URIs: Add your server URL + <code>/api/oauth/callback</code>
+                            <br>Example: <code>https://hanweir.146sharon.com/api/oauth/callback</code>
+                        </li>
+                        <li>
+                            <strong>Download credentials.json:</strong>
+                            <br>Download the OAuth client JSON file and save it as <code>credentials.json</code>
+                            on your server at <code>/opt/mailtagger/credentials.json</code>
+                        </li>
+                        <li>
+                            <strong>Click "Authorize Gmail" above:</strong>
+                            <br>This will redirect you to Google to grant permissions.
+                        </li>
+                    </ol>
+                    <p class="help-text" style="margin-top: 15px;">
+                        <strong>Note:</strong> The OAuth credentials must have your server's URL 
+                        as an authorized redirect URI in Google Cloud Console.
+                    </p>
+                </div>
             </div>
         </div>
     </div>

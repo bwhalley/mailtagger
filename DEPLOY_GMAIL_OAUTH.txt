@@ -1,0 +1,117 @@
+================================================================================
+                  DEPLOY GMAIL OAUTH TO YOUR SERVER
+================================================================================
+
+FILES TO COPY
+-------------
+
+cd /Users/brian/Downloads/mailtagger
+
+scp api.py \
+    web/index.html \
+    web/app.js \
+    web/style.css \
+    GMAIL_OAUTH_SETUP.md \
+    GMAIL_OAUTH_QUICK_START.md \
+    user@hanweir.146sharon.com:/opt/mailtagger/
+
+
+SETUP OAUTH CREDENTIALS
+------------------------
+
+1. Go to: https://console.cloud.google.com/
+
+2. Create project (or select existing)
+
+3. Enable Gmail API:
+   APIs & Services → Library → Gmail API → Enable
+
+4. Create OAuth client:
+   APIs & Services → Credentials → Create Credentials → OAuth client ID
+   
+   Type: "Web application" (NOT Desktop!)
+   Name: "Mailtagger Web"
+   
+   Authorized redirect URIs (ADD THIS):
+   https://hanweir.146sharon.com/api/oauth/callback
+   
+   Download JSON
+
+5. Copy credentials to server:
+   scp ~/Downloads/client_secret_*.json \
+       user@hanweir.146sharon.com:/opt/mailtagger/credentials.json
+
+
+CONFIGURE OAUTH CONSENT SCREEN
+-------------------------------
+
+1. APIs & Services → OAuth consent screen
+
+2. User Type: External → Create
+
+3. Fill required fields:
+   App name: Mailtagger
+   User support email: your@email.com
+   Developer contact: your@email.com
+
+4. Scopes → Add or Remove Scopes:
+   Select: https://www.googleapis.com/auth/gmail.modify
+
+5. Test users → Add Users:
+   Add your Gmail address
+
+6. Save
+
+
+RESTART SERVICES ON SERVER
+---------------------------
+
+ssh user@hanweir.146sharon.com
+
+# Restart API server (adjust command for your setup)
+sudo systemctl restart mailtagger-api
+# OR
+cd /opt/mailtagger && pkill -f api.py && ./venv/bin/python api.py &
+
+# Nginx should auto-serve updated web files
+sudo systemctl reload nginx
+
+
+AUTHORIZE GMAIL
+---------------
+
+1. Open: https://hanweir.146sharon.com
+
+2. Click "🔐 Gmail Auth" tab
+
+3. Click "Authorize Gmail"
+
+4. Sign in to Google and grant permissions
+
+5. You'll be redirected back → Success!
+
+
+VERIFY IT WORKS
+---------------
+
+# Check status via API
+curl https://hanweir.146sharon.com/api/gmail/status
+
+# Test via web UI
+Go to "🧪 Test" tab → Run test on 5 emails
+
+
+DONE! 🎉
+
+================================================================================
+
+WHAT YOU GET:
+
+✅ Web-based Gmail authorization (no SSH needed)
+✅ Visual status indicator
+✅ Shows connected email address
+✅ One-click authorize/revoke
+✅ Perfect for remote servers
+
+================================================================================
+

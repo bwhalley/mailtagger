@@ -9,9 +9,11 @@ import time
 import signal
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import BaseModel
 
 # Import from existing modules
@@ -24,9 +26,23 @@ try:
 except ImportError:
     GMAIL_AVAILABLE = False
 
+# Import Google OAuth libraries
+try:
+    from google_auth_oauthlib.flow import Flow
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request as GoogleRequest
+    OAUTH_AVAILABLE = True
+except ImportError:
+    OAUTH_AVAILABLE = False
+
 # Configuration
 PROMPT_DB_PATH = os.getenv("PROMPT_DB_PATH", "./data/prompts.db")
 DAEMON_PID_FILE = os.getenv("DAEMON_PID_FILE", "./data/daemon.pid")
+CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH", ".")
+SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+
+# OAuth redirect URI (will be configured dynamically)
+OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:8000/api/oauth/callback")
 
 # Initialize app and services
 app = FastAPI(
@@ -46,6 +62,10 @@ app.add_middleware(
 
 # Initialize prompt service
 prompt_service = PromptService(PROMPT_DB_PATH)
+
+# Setup logging
+import logging
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -316,8 +336,214 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "gmail_available": GMAIL_AVAILABLE,
-        "prompt_db": os.path.exists(PROMPT_DB_PATH)
+        "prompt_db": os.path.exists(PROMPT_DB_PATH),
+        "oauth_available": OAUTH_AVAILABLE
     }
+
+
+# ============================================================================
+# Gmail OAuth Endpoints
+# ============================================================================
+
+@app.get("/api/gmail/status")
+async def gmail_auth_status():
+    """Check Gmail authorization status."""
+    token_path = Path(CREDENTIALS_PATH) / 'token.json'
+    creds_path = Path(CREDENTIALS_PATH) / 'credentials.json'
+    
+    status = {
+        "credentials_exists": creds_path.exists(),
+        "token_exists": token_path.exists(),
+        "authorized": False,
+        "email": None,
+        "token_valid": False
+    }
+    
+    # Check if credentials.json exists
+    if not creds_path.exists():
+        status["message"] = "credentials.json not found. Please upload Gmail API credentials."
+        return status
+    
+    # Check if token exists and is valid
+    if token_path.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            
+            if creds and creds.valid:
+                status["authorized"] = True
+                status["token_valid"] = True
+                status["message"] = "Gmail is authorized and ready!"
+                
+                # Try to get email address
+                try:
+                    from googleapiclient.discovery import build
+                    service = build('gmail', 'v1', credentials=creds)
+                    profile = service.users().getProfile(userId='me').execute()
+                    status["email"] = profile.get('emailAddress')
+                except Exception as e:
+                    logger.warning(f"Could not fetch email address: {e}")
+                    
+            elif creds and creds.expired and creds.refresh_token:
+                # Try to refresh
+                try:
+                    creds.refresh(GoogleRequest())
+                    with open(token_path, 'w') as token:
+                        token.write(creds.to_json())
+                    status["authorized"] = True
+                    status["token_valid"] = True
+                    status["message"] = "Token refreshed successfully!"
+                except Exception as e:
+                    status["message"] = f"Token expired and refresh failed: {str(e)}"
+            else:
+                status["message"] = "Token exists but is invalid. Please reauthorize."
+        except Exception as e:
+            status["message"] = f"Error reading token: {str(e)}"
+    else:
+        status["message"] = "Not authorized. Please click 'Authorize Gmail' to begin."
+    
+    return status
+
+
+@app.get("/api/oauth/start")
+async def start_oauth_flow(request: Request):
+    """Start Gmail OAuth flow."""
+    if not OAUTH_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="OAuth libraries not available. Install google-auth-oauthlib."
+        )
+    
+    creds_path = Path(CREDENTIALS_PATH) / 'credentials.json'
+    
+    if not creds_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="credentials.json not found. Please upload Gmail API credentials first."
+        )
+    
+    try:
+        # Determine redirect URI based on request origin
+        origin = request.headers.get('origin', '')
+        if origin:
+            # Use the actual origin (http or https)
+            redirect_uri = f"{origin}/api/oauth/callback"
+        else:
+            # Fallback to configured value
+            redirect_uri = OAUTH_REDIRECT_URI
+        
+        # Create OAuth flow
+        flow = Flow.from_client_secrets_file(
+            str(creds_path),
+            scopes=SCOPES,
+            redirect_uri=redirect_uri
+        )
+        
+        # Generate authorization URL
+        auth_url, state = flow.authorization_url(
+            access_type='offline',
+            include_granted_scopes='true',
+            prompt='consent'  # Force consent screen to get refresh token
+        )
+        
+        # Store state for verification (in production, use session or cache)
+        # For simplicity, we'll store in a file
+        state_path = Path(CREDENTIALS_PATH) / 'oauth_state.txt'
+        with open(state_path, 'w') as f:
+            f.write(state)
+        
+        return {
+            "auth_url": auth_url,
+            "state": state
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start OAuth flow: {str(e)}"
+        )
+
+
+@app.get("/api/oauth/callback")
+async def oauth_callback(request: Request, code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    """Handle OAuth callback from Google."""
+    if error:
+        return RedirectResponse(
+            url=f"/?oauth_error={error}",
+            status_code=302
+        )
+    
+    if not code or not state:
+        return RedirectResponse(
+            url="/?oauth_error=missing_code_or_state",
+            status_code=302
+        )
+    
+    try:
+        creds_path = Path(CREDENTIALS_PATH) / 'credentials.json'
+        state_path = Path(CREDENTIALS_PATH) / 'oauth_state.txt'
+        token_path = Path(CREDENTIALS_PATH) / 'token.json'
+        
+        # Verify state
+        if state_path.exists():
+            with open(state_path, 'r') as f:
+                expected_state = f.read().strip()
+            if state != expected_state:
+                return RedirectResponse(
+                    url="/?oauth_error=invalid_state",
+                    status_code=302
+                )
+            # Clean up state file
+            state_path.unlink()
+        
+        # Determine redirect URI
+        origin = request.headers.get('origin', '')
+        if origin:
+            redirect_uri = f"{origin}/api/oauth/callback"
+        else:
+            # Try to construct from request URL
+            redirect_uri = str(request.url).split('?')[0]
+        
+        # Exchange code for token
+        flow = Flow.from_client_secrets_file(
+            str(creds_path),
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
+            state=state
+        )
+        
+        flow.fetch_token(code=code)
+        creds = flow.credentials
+        
+        # Save credentials
+        with open(token_path, 'w') as token:
+            token.write(creds.to_json())
+        
+        logger.info("Gmail OAuth completed successfully!")
+        
+        # Redirect back to main page with success message
+        return RedirectResponse(
+            url="/?oauth_success=true",
+            status_code=302
+        )
+        
+    except Exception as e:
+        logger.error(f"OAuth callback error: {e}")
+        return RedirectResponse(
+            url=f"/?oauth_error={str(e)}",
+            status_code=302
+        )
+
+
+@app.post("/api/gmail/revoke")
+async def revoke_gmail_auth():
+    """Revoke Gmail authorization (delete token)."""
+    token_path = Path(CREDENTIALS_PATH) / 'token.json'
+    
+    if token_path.exists():
+        token_path.unlink()
+        return {"success": True, "message": "Authorization revoked"}
+    else:
+        return {"success": False, "message": "No authorization to revoke"}
 
 
 # ============================================================================
