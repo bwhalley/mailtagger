@@ -1,0 +1,74 @@
+================================================================================
+                    FIX DOCKER OAUTH ERROR - DEPLOY COMMANDS
+================================================================================
+
+PROBLEM: Daemon tries to open browser for OAuth in Docker → fails
+
+SOLUTION: Daemon now waits for web-based authorization
+
+
+DEPLOY UPDATED FILE
+-------------------
+
+cd /Users/brian/Downloads/mailtagger
+
+scp gmail_categorizer.py user@hanweir.146sharon.com:/opt/mailtagger/
+
+
+REBUILD & RESTART DOCKER
+-------------------------
+
+ssh user@hanweir.146sharon.com
+
+cd /opt/mailtagger
+
+# Rebuild with updated code
+docker-compose build
+
+# Restart services
+docker-compose up -d
+
+# Watch logs
+docker-compose logs -f mailtagger-app
+
+
+AUTHORIZE GMAIL
+---------------
+
+1. Open: https://hanweir.146sharon.com
+
+2. Go to "🔐 Gmail Auth" tab
+
+3. Click "Authorize Gmail"
+
+4. Complete Google sign-in
+
+5. Done! Daemon will start processing on next cycle (5 min)
+
+
+VERIFY IT WORKS
+---------------
+
+# Check daemon logs
+docker-compose logs -f mailtagger-app
+
+# Before auth, you'll see:
+# "Gmail not authorized! Please authorize via web interface"
+# "Waiting for Gmail authorization..."
+
+# After auth, you'll see:
+# "Found X thread(s) to process"
+# "[ecommerce] conf=0.95 ..."
+
+
+THAT'S IT! 🎉
+
+The daemon will:
+✅ Start successfully without errors
+✅ Show helpful message if not authorized
+✅ Wait patiently for web authorization
+✅ Auto-detect when authorized
+✅ Start processing emails automatically
+
+================================================================================
+

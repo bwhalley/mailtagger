@@ -192,8 +192,14 @@ def create_retry_session(retries: int = MAX_RETRIES, backoff: float = RETRY_BACK
     return session
 
 # ------- Gmail API -------
-def gmail_service() -> Any:
-    """Initialize and return Gmail API service."""
+def gmail_service(skip_auth_flow: bool = False) -> Any:
+    """
+    Initialize and return Gmail API service.
+    
+    Args:
+        skip_auth_flow: If True, don't attempt OAuth flow. Just raise exception if no valid token.
+                       Useful for daemon mode where web-based auth should be used.
+    """
     creds = None
     token_path = Path(CREDENTIALS_PATH) / 'token.json'
     creds_path = Path(CREDENTIALS_PATH) / 'credentials.json'
@@ -208,6 +214,9 @@ def gmail_service() -> Any:
             try:
                 creds.refresh(Request())
                 logger.info("Token refreshed successfully")
+                # Save refreshed token
+                with open(token_path, 'w') as token:
+                    token.write(creds.to_json())
             except Exception as e:
                 logger.error(f"Failed to refresh token: {e}")
                 raise
@@ -215,7 +224,17 @@ def gmail_service() -> Any:
             if not creds_path.exists():
                 logger.error(f"credentials.json not found at {creds_path}")
                 logger.error("See README to create Gmail API credentials")
-                sys.exit(1)
+                raise RuntimeError("credentials.json not found")
+            
+            # Check if we should skip the auth flow (daemon mode)
+            if skip_auth_flow:
+                logger.warning("=" * 80)
+                logger.warning("Gmail not authorized! Please authorize via web interface:")
+                logger.warning("1. Open your Mailtagger web interface")
+                logger.warning("2. Go to 'Gmail Auth' tab")
+                logger.warning("3. Click 'Authorize Gmail'")
+                logger.warning("=" * 80)
+                raise RuntimeError("Gmail not authorized. Please use web interface to authorize.")
             
             logger.info("Starting OAuth flow...")
             flow = InstalledAppFlow.from_client_secrets_file(str(creds_path), SCOPES)
@@ -252,11 +271,11 @@ def gmail_service() -> Any:
                     creds = flow.run_console()
                     logger.info("=" * 80)
                     logger.info("OAuth flow completed successfully")
-        
-        # Save the credentials for the next run
-        with open(token_path, 'w') as token:
-            token.write(creds.to_json())
-        logger.debug(f"Token saved to {token_path}")
+            
+            # Save the credentials for the next run
+            with open(token_path, 'w') as token:
+                token.write(creds.to_json())
+            logger.debug(f"Token saved to {token_path}")
     
     return build('gmail', 'v1', credentials=creds)
 
@@ -709,8 +728,13 @@ def label_thread(svc, thread_id: str, add_label_ids):
     body = {"addLabelIds": add_label_ids, "removeLabelIds": []}
     return svc.users().threads().modify(userId='me', id=thread_id, body=body).execute()
 
-def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbose=False) -> int:
-    """Run one iteration of email processing. Returns number of processed emails."""
+def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbose=False, daemon_mode=False) -> int:
+    """
+    Run one iteration of email processing. Returns number of processed emails.
+    
+    Args:
+        daemon_mode: If True, skip interactive OAuth and just report auth needed.
+    """
     global shutdown_requested
     
     logger.info(f"Starting email processing run (dry_run={dry_run}, max_results={max_results})")
@@ -728,9 +752,11 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
     }
     
     try:
-        svc = gmail_service()
+        svc = gmail_service(skip_auth_flow=daemon_mode)
     except Exception as e:
         logger.error(f"Failed to initialize Gmail service: {e}")
+        if daemon_mode and "not authorized" in str(e).lower():
+            logger.info("Waiting for Gmail authorization via web interface...")
         return 0
     
     want_labels = [LABEL_ECOMMERCE, LABEL_POLITICAL, LABEL_TRIAGED]
@@ -907,7 +933,8 @@ def run_daemon(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY,
                 dry_run=dry_run,
                 max_results=max_results,
                 query=query,
-                verbose=verbose
+                verbose=verbose,
+                daemon_mode=True
             )
             total_processed += processed
             
