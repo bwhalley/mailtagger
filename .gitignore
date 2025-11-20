@@ -199,4 +199,9 @@ logs/
 *.tmp
 *.temp
 temp/
-tmp/ 
+tmp/
+
+# Application-specific data files
+data/prompts.db
+data/*.db
+*.pid 

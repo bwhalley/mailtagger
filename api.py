@@ -189,6 +189,8 @@ async def test_prompt(request: TestRequest):
                 text = gmail_categorizer.extract_text_from_payload(payload) or ""
                 snippet = gmail_categorizer.safe_snippet(text, 4000)
                 
+                print(f"  Extracted {len(text)} chars, using {len(snippet)} char snippet")
+                
                 # Classify with the test prompt (temporarily override PROMPT_RULES)
                 start_time = time.time()
                 
