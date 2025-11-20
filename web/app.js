@@ -2,9 +2,8 @@
 // Simple vanilla JS - no frameworks
 
 // Configuration
-const API_URL = window.location.hostname === 'localhost' 
-    ? 'http://localhost:8000' 
-    : 'http://localhost:8000';  // Update for production
+// Use same origin as the page (works with nginx proxy or direct access)
+const API_URL = window.location.origin;
 
 // ============================================================================
 // Tab Management
