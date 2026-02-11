@@ -2,8 +2,18 @@
 // Simple vanilla JS - no frameworks
 
 // Configuration
-// Use same origin as the page (works with nginx proxy or direct access)
-const API_URL = window.location.origin;
+// Use same origin when served behind nginx proxy (single port).
+// When UI is on :8080 and API on :8000 (Docker), use API port explicitly.
+function getApiUrl() {
+    const origin = window.location.origin;
+    const port = window.location.port;
+    // Docker: UI on 8080, API on 8000 - browser must call API directly
+    if (port === '8080' && origin.startsWith('http')) {
+        return origin.replace(':8080', ':8000');
+    }
+    return origin;
+}
+const API_URL = getApiUrl();
 
 // ============================================================================
 // Tab Management
