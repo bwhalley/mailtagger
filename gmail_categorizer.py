@@ -26,6 +26,16 @@ try:
 except Exception:
     pass
 
+# DSPy support (optional)
+try:
+    import dspy
+    from dspy_signatures import EmailClassification
+    from dspy_config import configure_dspy_lm
+    DSPY_AVAILABLE = True
+except ImportError:
+    DSPY_AVAILABLE = False
+    dspy = None
+
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
 # ------- Configuration -------
@@ -60,6 +70,9 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 # Retry settings
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "2.0"))
+
+# DSPy settings
+USE_DSPY = os.getenv("USE_DSPY", "false").lower() in ("true", "1", "yes")
 
 # ------- Global State -------
 shutdown_requested = False
@@ -708,7 +721,137 @@ def extract_category_fallback(content: str) -> Dict[str, Any]:
     
     return {"category": "none", "reason": "fallback_no_match", "confidence": 0.0}
 
+# ------- DSPy Classifier -------
+# Global DSPy classifier instance (lazy-initialized)
+_dspy_lm = None
+_dspy_classifier = None
+
+def get_dspy_classifier():
+    """Lazy-initialize DSPy classifier.
+    
+    Returns:
+        Initialized DSPy ChainOfThought classifier
+        
+    Raises:
+        RuntimeError: If DSPy is not available or configuration fails
+    """
+    global _dspy_lm, _dspy_classifier
+    
+    if not DSPY_AVAILABLE:
+        raise RuntimeError(
+            "DSPy is not available. Install it with: pip install dspy-ai>=2.5.0"
+        )
+    
+    if _dspy_classifier is None:
+        logger.info("Initializing DSPy classifier...")
+        try:
+            _dspy_lm = configure_dspy_lm()
+            # Use ChainOfThought for better reasoning
+            _dspy_classifier = dspy.ChainOfThought(EmailClassification)
+            logger.info("DSPy classifier initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize DSPy classifier: {e}")
+            raise RuntimeError(f"DSPy initialization failed: {e}")
+    
+    return _dspy_classifier
+
+def call_llm_classifier_dspy(subject: str, body: str, sender: str, verbose: bool = False) -> Dict[str, Any]:
+    """Classify email using DSPy.
+    
+    This uses DSPy's ChainOfThought module which automatically handles:
+    - Structured input/output via signatures
+    - Chain-of-thought reasoning for better accuracy
+    - Type-safe outputs with validation
+    
+    Args:
+        subject: Email subject line
+        body: Email body text
+        sender: Email sender address
+        verbose: If True, log detailed information
+        
+    Returns:
+        Dict with keys: category, reason, confidence, _reasoning (optional), _elapsed
+    """
+    classifier = get_dspy_classifier()
+    
+    start_time = time.time()
+    
+    try:
+        # Truncate body to avoid token limits
+        body_snippet = safe_snippet(body, max_chars=6000)
+        
+        if verbose:
+            logger.debug(f"DSPy classifying email from {sender}")
+            logger.debug(f"  Subject: {subject[:100]}...")
+            logger.debug(f"  Body length: {len(body_snippet)} chars")
+        
+        # Call DSPy classifier
+        result = classifier(
+            sender=sender,
+            subject=subject,
+            body=body_snippet
+        )
+        
+        elapsed = time.time() - start_time
+        
+        # Extract results
+        response = {
+            "category": result.category,
+            "reason": result.reason,
+            "confidence": float(result.confidence),
+            "_elapsed": elapsed
+        }
+        
+        # Include chain-of-thought reasoning if available
+        if hasattr(result, 'reasoning') and result.reasoning:
+            response["_reasoning"] = result.reasoning
+            if verbose:
+                logger.debug(f"  Reasoning: {result.reasoning[:200]}...")
+        
+        if verbose:
+            logger.info(f"DSPy classification: {result.category} "
+                       f"(confidence: {result.confidence:.2f}, "
+                       f"elapsed: {elapsed:.2f}s)")
+        
+        return response
+        
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"DSPy classifier error: {e}")
+        if verbose:
+            logger.exception("Full DSPy error traceback:")
+        
+        # Return error result
+        return {
+            "category": "none",
+            "reason": f"dspy_error: {str(e)[:100]}",
+            "confidence": 0.0,
+            "_elapsed": elapsed,
+            "_error": str(e)
+        }
+
 def call_llm_classifier(subject: str, body: str, sender: str, verbose: bool = False) -> Dict[str, Any]:
+    """Main entry point for LLM classification.
+    
+    Routes to DSPy or legacy implementation based on USE_DSPY environment variable.
+    
+    Args:
+        subject: Email subject line
+        body: Email body text
+        sender: Email sender address
+        verbose: If True, log detailed information
+        
+    Returns:
+        Dict with keys: category, reason, confidence
+    """
+    # Route to DSPy if enabled
+    if USE_DSPY:
+        if not DSPY_AVAILABLE:
+            logger.warning("USE_DSPY=true but DSPy not available, falling back to legacy")
+        else:
+            return call_llm_classifier_dspy(subject, body, sender, verbose)
+    
+    # Legacy implementation
     provider = LLM_PROVIDER
     if provider == "ollama":
         return call_ollama_classifier(subject, body, sender, verbose)
@@ -966,6 +1109,127 @@ def run_daemon(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY,
     logger.info(f"Total emails processed: {total_processed}")
     logger.info("=" * 80)
 
+def run_optimize(
+    train_data: str,
+    val_data: str,
+    output: str = "./data/optimized_classifier.json",
+    optimizer: str = "bootstrap",
+    metric: str = "accuracy",
+    max_demos: int = 5,
+    use_cot: bool = True
+):
+    """Run DSPy optimization on evaluation datasets.
+    
+    Args:
+        train_data: Path to training dataset (JSON)
+        val_data: Path to validation dataset (JSON)
+        output: Output path for optimized classifier
+        optimizer: Optimization algorithm ('bootstrap', 'random_search', 'mipro')
+        metric: Metric to optimize ('accuracy', 'weighted', 'combined')
+        max_demos: Maximum few-shot examples in prompts
+        use_cot: If True, use chain-of-thought reasoning
+    """
+    if not DSPY_AVAILABLE:
+        logger.error("DSPy is not available. Install it with: pip install dspy-ai>=2.5.0")
+        sys.exit(1)
+    
+    from evaluation.create_dataset import load_dataset
+    from dspy_optimizer import (
+        optimize_with_bootstrap_fewshot,
+        optimize_with_random_search,
+        optimize_with_mipro,
+        save_optimized_classifier,
+        compare_classifiers,
+        EmailClassifierModule
+    )
+    from dspy_metrics import classification_accuracy, weighted_accuracy, combined_metric
+    
+    logger.info("=" * 80)
+    logger.info("DSPy Classifier Optimization")
+    logger.info("=" * 80)
+    logger.info(f"Configuration:")
+    logger.info(f"  LLM Provider: {LLM_PROVIDER}")
+    if LLM_PROVIDER == "ollama":
+        logger.info(f"  Ollama Model: {OLLAMA_MODEL}")
+    else:
+        logger.info(f"  OpenAI Model: {OPENAI_MODEL}")
+    logger.info(f"  Optimizer: {optimizer}")
+    logger.info(f"  Metric: {metric}")
+    logger.info(f"  Max demos: {max_demos}")
+    logger.info(f"  Use CoT: {use_cot}")
+    logger.info("=" * 80)
+    
+    # Load datasets
+    logger.info(f"Loading training data from {train_data}...")
+    train_examples = load_dataset(train_data)
+    logger.info(f"  Loaded {len(train_examples)} training examples")
+    
+    logger.info(f"Loading validation data from {val_data}...")
+    val_examples = load_dataset(val_data)
+    logger.info(f"  Loaded {len(val_examples)} validation examples")
+    
+    if not train_examples or not val_examples:
+        logger.error("No examples found in datasets")
+        sys.exit(1)
+    
+    # Select metric
+    metric_map = {
+        'accuracy': classification_accuracy,
+        'weighted': weighted_accuracy,
+        'combined': combined_metric
+    }
+    metric_fn = metric_map.get(metric, classification_accuracy)
+    
+    # Run optimization
+    logger.info(f"\nStarting {optimizer} optimization...")
+    logger.info("This may take several minutes...")
+    
+    start_time = time.time()
+    
+    if optimizer == 'bootstrap':
+        optimized = optimize_with_bootstrap_fewshot(
+            train_examples, val_examples,
+            metric=metric_fn,
+            max_bootstrapped_demos=max_demos,
+            use_cot=use_cot
+        )
+    elif optimizer == 'random_search':
+        optimized = optimize_with_random_search(
+            train_examples, val_examples,
+            metric=metric_fn,
+            max_bootstrapped_demos=max_demos,
+            use_cot=use_cot
+        )
+    elif optimizer == 'mipro':
+        optimized = optimize_with_mipro(
+            train_examples, val_examples,
+            metric=metric_fn,
+            use_cot=use_cot
+        )
+    else:
+        logger.error(f"Unknown optimizer: {optimizer}")
+        sys.exit(1)
+    
+    elapsed = time.time() - start_time
+    logger.info(f"✓ Optimization completed in {elapsed:.1f}s")
+    
+    # Save optimized classifier
+    save_optimized_classifier(optimized, output)
+    logger.info(f"✓ Saved optimized classifier to {output}")
+    
+    # Compare baseline vs optimized
+    logger.info("\nComparing baseline vs optimized...")
+    baseline = EmailClassifierModule(use_cot=use_cot)
+    compare_classifiers(baseline, optimized, val_examples, verbose=True)
+    
+    logger.info("=" * 80)
+    logger.info("Optimization Complete!")
+    logger.info("=" * 80)
+    logger.info(f"\nTo use the optimized classifier:")
+    logger.info(f"  1. Set USE_DSPY=true in your environment")
+    logger.info(f"  2. Run: python gmail_categorizer.py")
+    logger.info("=" * 80)
+
 def main():
     global CREDENTIALS_PATH
     
@@ -982,6 +1246,10 @@ Examples:
   %(prog)s --daemon
   %(prog)s --daemon --interval 600  # Check every 10 minutes
   
+  # Optimize DSPy classifier
+  %(prog)s --optimize --train-data data/train.json --val-data data/val.json
+  %(prog)s --optimize --optimizer mipro --max-demos 8
+  
   # Docker mode
   %(prog)s --daemon --credentials-path /app/data
         """
@@ -990,6 +1258,8 @@ Examples:
     # Mode selection
     ap.add_argument("--daemon", action="store_true", 
                     help="Run in daemon mode (continuous processing)")
+    ap.add_argument("--optimize", action="store_true",
+                    help="Run DSPy optimization (requires train/val datasets)")
     
     # Common options
     ap.add_argument("--dry-run", action="store_true", 
@@ -1004,6 +1274,24 @@ Examples:
     # Daemon mode options
     ap.add_argument("--interval", type=int, default=DAEMON_INTERVAL,
                     help=f"Interval between runs in seconds (daemon mode, default: {DAEMON_INTERVAL})")
+    
+    # Optimization options
+    ap.add_argument("--train-data", type=str,
+                    help="Path to training dataset JSON (optimize mode)")
+    ap.add_argument("--val-data", type=str,
+                    help="Path to validation dataset JSON (optimize mode)")
+    ap.add_argument("--optimizer", type=str, default="bootstrap",
+                    choices=['bootstrap', 'random_search', 'mipro'],
+                    help="Optimization algorithm (optimize mode, default: bootstrap)")
+    ap.add_argument("--metric", type=str, default="accuracy",
+                    choices=['accuracy', 'weighted', 'combined'],
+                    help="Optimization metric (optimize mode, default: accuracy)")
+    ap.add_argument("--max-demos", type=int, default=5,
+                    help="Max few-shot examples in prompts (optimize mode, default: 5)")
+    ap.add_argument("--output", type=str, default="./data/optimized_classifier.json",
+                    help="Output path for optimized classifier (optimize mode)")
+    ap.add_argument("--no-cot", action="store_true",
+                    help="Disable chain-of-thought reasoning (optimize mode)")
     
     # Configuration options
     ap.add_argument("--credentials-path", type=str, default=CREDENTIALS_PATH,
@@ -1024,8 +1312,24 @@ Examples:
         logger.setLevel(getattr(logging, args.log_level))
         logger.info(f"Log level set to {args.log_level}")
     
-    # Run in daemon or one-time mode
-    if args.daemon:
+    # Run in optimize, daemon, or one-time mode
+    if args.optimize:
+        # Validate required arguments for optimization
+        if not args.train_data or not args.val_data:
+            logger.error("--optimize requires --train-data and --val-data arguments")
+            logger.error("Example: python gmail_categorizer.py --optimize --train-data data/train.json --val-data data/val.json")
+            sys.exit(1)
+        
+        run_optimize(
+            train_data=args.train_data,
+            val_data=args.val_data,
+            output=args.output,
+            optimizer=args.optimizer,
+            metric=args.metric,
+            max_demos=args.max_demos,
+            use_cot=not args.no_cot
+        )
+    elif args.daemon:
         run_daemon(
             dry_run=args.dry_run,
             max_results=args.max,

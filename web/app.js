@@ -543,6 +543,273 @@ async function revokeGmail() {
 }
 
 // ============================================================================
+// DSPy Optimization Functions
+// ============================================================================
+
+async function runOptimization() {
+    const resultsDiv = document.getElementById('optimize-results');
+    const loadingDiv = document.getElementById('optimize-loading');
+    
+    // Get form values
+    const trainDataPath = document.getElementById('train-dataset').value;
+    const valDataPath = document.getElementById('val-dataset').value;
+    const optimizer = document.getElementById('optimizer-type').value;
+    const metric = document.getElementById('optimize-metric').value;
+    const maxDemos = parseInt(document.getElementById('max-demos').value);
+    const useCot = document.getElementById('use-cot').checked;
+    
+    if (!trainDataPath || !valDataPath) {
+        resultsDiv.innerHTML = `
+            <div class="status status-error">
+                Please provide both training and validation dataset paths.
+            </div>
+        `;
+        return;
+    }
+    
+    loadingDiv.style.display = 'block';
+    resultsDiv.innerHTML = '';
+    
+    try {
+        const response = await fetch(`${API_URL}/api/optimize`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                train_data_path: trainDataPath,
+                val_data_path: valDataPath,
+                optimizer: optimizer,
+                metric: metric,
+                max_demos: maxDemos,
+                use_cot: useCot
+            })
+        });
+        
+        const data = await response.json();
+        loadingDiv.style.display = 'none';
+        
+        if (data.success) {
+            resultsDiv.innerHTML = `
+                <div class="status status-success">
+                    <h3>✅ Optimization Complete!</h3>
+                    <p><strong>Optimizer:</strong> ${data.optimizer}</p>
+                    <p><strong>Training examples:</strong> ${data.train_examples}</p>
+                    <p><strong>Validation examples:</strong> ${data.val_examples}</p>
+                    <p><strong>Output:</strong> ${data.output_path}</p>
+                    <p style="margin-top: 15px;">
+                        To use the optimized classifier, set <code>USE_DSPY=true</code> 
+                        in your environment and restart the daemon.
+                    </p>
+                </div>
+            `;
+        } else {
+            resultsDiv.innerHTML = `
+                <div class="status status-error">
+                    <h3>❌ Optimization Failed</h3>
+                    <p>${data.error || 'Unknown error occurred'}</p>
+                </div>
+            `;
+        }
+    } catch (error) {
+        loadingDiv.style.display = 'none';
+        resultsDiv.innerHTML = `
+            <div class="status status-error">
+                Error running optimization: ${error.message}
+            </div>
+        `;
+    }
+}
+
+// ============================================================================
+// Example Store Functions
+// ============================================================================
+
+async function loadExampleStats() {
+    const statsDiv = document.getElementById('example-stats');
+    
+    try {
+        const response = await fetch(`${API_URL}/api/example-store-stats`);
+        const data = await response.json();
+        
+        if (data.success) {
+            const stats = data.stats;
+            let html = `
+                <div class="card" style="background: #f0f9ff; padding: 15px;">
+                    <h3>📊 Example Store Statistics</h3>
+                    <p><strong>Total Examples:</strong> ${stats.total_examples}</p>
+                    <p><strong>Verified Examples:</strong> ${stats.verified_examples}</p>
+            `;
+            
+            if (stats.by_category) {
+                html += `<h4 style="margin-top: 15px;">By Category:</h4>`;
+                for (const [cat, catStats] of Object.entries(stats.by_category)) {
+                    html += `
+                        <p style="margin-left: 20px;">
+                            <strong>${cat}:</strong> ${catStats.count} examples 
+                            (avg confidence: ${catStats.avg_confidence.toFixed(2)})
+                        </p>
+                    `;
+                }
+            }
+            
+            html += `</div>`;
+            statsDiv.innerHTML = html;
+        }
+    } catch (error) {
+        statsDiv.innerHTML = `
+            <div class="status status-error">
+                Error loading stats: ${error.message}
+            </div>
+        `;
+    }
+}
+
+async function addExample() {
+    const sender = document.getElementById('example-sender').value;
+    const subject = document.getElementById('example-subject').value;
+    const body = document.getElementById('example-body').value;
+    const category = document.getElementById('example-category').value;
+    const confidence = parseFloat(document.getElementById('example-confidence').value);
+    const verified = document.getElementById('example-verified').checked;
+    const notes = document.getElementById('example-notes').value;
+    
+    if (!sender || !subject || !body) {
+        alert('Please fill in sender, subject, and body fields.');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_URL}/api/few-shot-examples`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sender, subject, body, category, confidence, verified, notes
+            })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            // Clear form
+            document.getElementById('example-sender').value = '';
+            document.getElementById('example-subject').value = '';
+            document.getElementById('example-body').value = '';
+            document.getElementById('example-notes').value = '';
+            document.getElementById('example-verified').checked = false;
+            
+            // Reload examples and stats
+            loadExamples();
+            loadExampleStats();
+            
+            alert('Example added successfully!');
+        } else {
+            alert('Error adding example: ' + data.error);
+        }
+    } catch (error) {
+        alert('Error adding example: ' + error.message);
+    }
+}
+
+async function loadExamples() {
+    const loadingDiv = document.getElementById('examples-loading');
+    const listDiv = document.getElementById('examples-list');
+    const categoryFilter = document.getElementById('examples-filter').value;
+    
+    loadingDiv.style.display = 'block';
+    listDiv.innerHTML = '';
+    
+    try {
+        let url = `${API_URL}/api/few-shot-examples?limit=50`;
+        if (categoryFilter) {
+            url += `&category=${categoryFilter}`;
+        }
+        
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        loadingDiv.style.display = 'none';
+        
+        if (data.success && data.examples.length > 0) {
+            let html = '<div class="examples-grid">';
+            
+            for (const ex of data.examples) {
+                const verifiedBadge = ex.verified ? 
+                    '<span style="color: green;">✓ Verified</span>' : 
+                    '<span style="color: gray;">○ Unverified</span>';
+                
+                html += `
+                    <div class="card" style="margin-bottom: 10px; padding: 10px; background: #f9f9f9;">
+                        <div style="display: flex; justify-content: space-between;">
+                            <div>
+                                <strong>${ex.category}</strong> ${verifiedBadge}
+                                <span style="color: #666; margin-left: 10px;">
+                                    Confidence: ${ex.confidence.toFixed(2)}
+                                </span>
+                            </div>
+                            <button class="button button-small button-danger" 
+                                    onclick="deleteExample(${ex.id})">
+                                🗑️ Delete
+                            </button>
+                        </div>
+                        <p style="margin: 5px 0;"><strong>From:</strong> ${ex.sender}</p>
+                        <p style="margin: 5px 0;"><strong>Subject:</strong> ${ex.subject}</p>
+                        ${ex.body ? `<p style="margin: 5px 0; font-size: 0.9em; color: #666;">${ex.body.substring(0, 150)}...</p>` : ''}
+                        ${ex.notes ? `<p style="margin: 5px 0; font-style: italic; color: #666;">Note: ${ex.notes}</p>` : ''}
+                        <p style="margin: 5px 0; font-size: 0.8em; color: #999;">
+                            Used ${ex.use_count || 0} times
+                        </p>
+                    </div>
+                `;
+            }
+            
+            html += '</div>';
+            listDiv.innerHTML = html;
+        } else if (data.success) {
+            listDiv.innerHTML = `
+                <div class="status status-info">
+                    No examples found. Add some examples above to get started.
+                </div>
+            `;
+        } else {
+            listDiv.innerHTML = `
+                <div class="status status-error">
+                    Error loading examples: ${data.error}
+                </div>
+            `;
+        }
+    } catch (error) {
+        loadingDiv.style.display = 'none';
+        listDiv.innerHTML = `
+            <div class="status status-error">
+                Error loading examples: ${error.message}
+            </div>
+        `;
+    }
+}
+
+async function deleteExample(exampleId) {
+    if (!confirm('Are you sure you want to delete this example?')) {
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${API_URL}/api/few-shot-examples/${exampleId}`, {
+            method: 'DELETE'
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            loadExamples();
+            loadExampleStats();
+        } else {
+            alert('Error deleting example: ' + data.error);
+        }
+    } catch (error) {
+        alert('Error deleting example: ' + error.message);
+    }
+}
+
+// ============================================================================
 // Initialization
 // ============================================================================
 

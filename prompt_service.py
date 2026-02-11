@@ -267,6 +267,291 @@ Be conservative and only pick 'political' if clearly political."""
             )
 
 
+class ExampleStore:
+    """Store and retrieve few-shot examples for DSPy optimization.
+    
+    This class manages a collection of high-quality classification examples
+    that can be used for few-shot learning and prompt optimization.
+    """
+    
+    def __init__(self, db_path: str = "./data/prompts.db"):
+        self.db_path = db_path
+        self._ensure_examples_table()
+    
+    @contextmanager
+    def get_db(self):
+        """Context manager for database connections."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    
+    def _ensure_examples_table(self):
+        """Create few_shot_examples table if it doesn't exist."""
+        with self.get_db() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS few_shot_examples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email_id VARCHAR(255),
+                    sender VARCHAR(255) NOT NULL,
+                    subject TEXT NOT NULL,
+                    body TEXT,
+                    category VARCHAR(50) NOT NULL,
+                    confidence FLOAT DEFAULT 1.0,
+                    verified BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_used_at TIMESTAMP,
+                    use_count INTEGER DEFAULT 0,
+                    notes TEXT
+                )
+            """)
+            
+            # Create indices for faster retrieval
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_category 
+                ON few_shot_examples(category)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_verified 
+                ON few_shot_examples(verified)
+            """)
+    
+    def add_example(
+        self,
+        sender: str,
+        subject: str,
+        body: str,
+        category: str,
+        confidence: float = 1.0,
+        verified: bool = False,
+        email_id: Optional[str] = None,
+        notes: Optional[str] = None
+    ) -> int:
+        """Add a classification example to the store.
+        
+        Args:
+            sender: Email sender address
+            subject: Email subject line
+            body: Email body text
+            category: Category ('ecommerce', 'political', 'none')
+            confidence: Confidence score (0.0-1.0)
+            verified: If True, this is a human-verified example
+            email_id: Gmail email ID (optional)
+            notes: Additional notes (optional)
+            
+        Returns:
+            ID of the inserted example
+        """
+        with self.get_db() as conn:
+            cursor = conn.execute(
+                """INSERT INTO few_shot_examples 
+                   (email_id, sender, subject, body, category, confidence, verified, notes)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (email_id, sender, subject, body, category, confidence, verified, notes)
+            )
+            return cursor.lastrowid
+    
+    def get_example(self, example_id: int) -> Optional[Dict[str, Any]]:
+        """Get a specific example by ID.
+        
+        Args:
+            example_id: Example ID
+            
+        Returns:
+            Example dict or None if not found
+        """
+        with self.get_db() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM few_shot_examples WHERE id = ?",
+                (example_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def get_best_examples(
+        self,
+        category: Optional[str] = None,
+        k: int = 5,
+        verified_only: bool = True,
+        min_confidence: float = 0.8
+    ) -> List[Dict[str, Any]]:
+        """Retrieve best examples for few-shot prompting.
+        
+        Selection strategy:
+        1. Prioritize verified examples
+        2. Filter by confidence threshold
+        3. Balance across categories (if category not specified)
+        4. Prefer less-frequently-used examples (to avoid overfitting)
+        
+        Args:
+            category: If specified, only return examples from this category
+            k: Number of examples to return
+            verified_only: If True, only return human-verified examples
+            min_confidence: Minimum confidence threshold
+            
+        Returns:
+            List of example dicts
+        """
+        with self.get_db() as conn:
+            conditions = ["confidence >= ?"]
+            params = [min_confidence]
+            
+            if verified_only:
+                conditions.append("verified = 1")
+            
+            if category:
+                conditions.append("category = ?")
+                params.append(category)
+            
+            where_clause = " AND ".join(conditions)
+            
+            # Order by: verified first, then by use_count (ascending) to balance usage
+            query = f"""
+                SELECT * FROM few_shot_examples
+                WHERE {where_clause}
+                ORDER BY verified DESC, use_count ASC, confidence DESC
+                LIMIT ?
+            """
+            params.append(k)
+            
+            cursor = conn.execute(query, params)
+            examples = [dict(row) for row in cursor.fetchall()]
+            
+            # Update use counts
+            if examples:
+                example_ids = [ex['id'] for ex in examples]
+                placeholders = ','.join('?' * len(example_ids))
+                conn.execute(
+                    f"""UPDATE few_shot_examples 
+                        SET use_count = use_count + 1, 
+                            last_used_at = CURRENT_TIMESTAMP
+                        WHERE id IN ({placeholders})""",
+                    example_ids
+                )
+            
+            return examples
+    
+    def get_stratified_examples(
+        self,
+        k_per_category: int = 2,
+        verified_only: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Get balanced examples across all categories.
+        
+        Args:
+            k_per_category: Number of examples per category
+            verified_only: If True, only return verified examples
+            
+        Returns:
+            List of examples with balanced representation
+        """
+        categories = ['ecommerce', 'political', 'none']
+        all_examples = []
+        
+        for category in categories:
+            examples = self.get_best_examples(
+                category=category,
+                k=k_per_category,
+                verified_only=verified_only
+            )
+            all_examples.extend(examples)
+        
+        return all_examples
+    
+    def mark_verified(self, example_id: int, verified: bool = True):
+        """Mark an example as verified (or unverified).
+        
+        Args:
+            example_id: Example ID
+            verified: Verification status
+        """
+        with self.get_db() as conn:
+            conn.execute(
+                "UPDATE few_shot_examples SET verified = ? WHERE id = ?",
+                (verified, example_id)
+            )
+    
+    def delete_example(self, example_id: int):
+        """Delete an example from the store.
+        
+        Args:
+            example_id: Example ID
+        """
+        with self.get_db() as conn:
+            conn.execute(
+                "DELETE FROM few_shot_examples WHERE id = ?",
+                (example_id,)
+            )
+    
+    def get_all_examples(
+        self,
+        limit: Optional[int] = None,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get all examples (for UI display).
+        
+        Args:
+            limit: Maximum number of examples
+            offset: Offset for pagination
+            
+        Returns:
+            List of example dicts
+        """
+        with self.get_db() as conn:
+            query = """
+                SELECT * FROM few_shot_examples
+                ORDER BY created_at DESC
+            """
+            
+            if limit:
+                query += f" LIMIT {limit} OFFSET {offset}"
+            
+            cursor = conn.execute(query)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get statistics about the example store.
+        
+        Returns:
+            Dict with statistics
+        """
+        with self.get_db() as conn:
+            # Total examples
+            total = conn.execute(
+                "SELECT COUNT(*) as count FROM few_shot_examples"
+            ).fetchone()['count']
+            
+            # Verified examples
+            verified = conn.execute(
+                "SELECT COUNT(*) as count FROM few_shot_examples WHERE verified = 1"
+            ).fetchone()['count']
+            
+            # By category
+            by_category = {}
+            cursor = conn.execute("""
+                SELECT category, COUNT(*) as count, AVG(confidence) as avg_conf
+                FROM few_shot_examples
+                GROUP BY category
+            """)
+            for row in cursor:
+                by_category[row['category']] = {
+                    'count': row['count'],
+                    'avg_confidence': round(row['avg_conf'], 3) if row['avg_conf'] else 0
+                }
+            
+            return {
+                'total_examples': total,
+                'verified_examples': verified,
+                'by_category': by_category
+            }
+
+
 def main():
     """Test the prompt service."""
     service = PromptService("./data/prompts.db")
@@ -279,6 +564,30 @@ def main():
     # Get stats
     stats = service.get_statistics()
     print(f"\nStatistics: {json.dumps(stats, indent=2)}")
+    
+    # Test ExampleStore
+    print("\n--- Testing ExampleStore ---")
+    example_store = ExampleStore("./data/prompts.db")
+    
+    # Add a test example
+    example_id = example_store.add_example(
+        sender="test@example.com",
+        subject="Test ecommerce email",
+        body="Shop our amazing sale! 50% off everything!",
+        category="ecommerce",
+        confidence=0.95,
+        verified=True,
+        notes="Test example"
+    )
+    print(f"Added example ID: {example_id}")
+    
+    # Get statistics
+    ex_stats = example_store.get_statistics()
+    print(f"Example store stats: {json.dumps(ex_stats, indent=2)}")
+    
+    # Clean up test example
+    example_store.delete_example(example_id)
+    print("Cleaned up test example")
 
 
 if __name__ == "__main__":

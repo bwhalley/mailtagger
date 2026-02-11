@@ -552,6 +552,300 @@ async def revoke_gmail_auth():
 
 
 # ============================================================================
+# DSPy Optimization & Evaluation Endpoints
+# ============================================================================
+
+class OptimizeRequest(BaseModel):
+    """Request model for optimization."""
+    train_data_path: str
+    val_data_path: str
+    optimizer: str = "bootstrap"
+    metric: str = "accuracy"
+    max_demos: int = 5
+    use_cot: bool = True
+
+
+class EvaluateRequest(BaseModel):
+    """Request model for evaluation."""
+    dataset_path: str
+    use_optimized: bool = False
+
+
+@app.post("/api/optimize")
+async def optimize_classifier(request: OptimizeRequest):
+    """Trigger DSPy classifier optimization.
+    
+    This runs the DSPy optimization process to improve the classifier
+    using training and validation datasets.
+    """
+    try:
+        # Check if DSPy is available
+        try:
+            import dspy
+            from evaluation.create_dataset import load_dataset
+            from dspy_optimizer import (
+                optimize_with_bootstrap_fewshot,
+                optimize_with_random_search,
+                optimize_with_mipro,
+                save_optimized_classifier,
+                EmailClassifierModule
+            )
+            from dspy_metrics import classification_accuracy, weighted_accuracy, combined_metric
+            from dspy_config import configure_dspy_lm
+        except ImportError as e:
+            return {
+                "success": False,
+                "error": f"DSPy not available: {str(e)}"
+            }
+        
+        # Validate paths
+        if not Path(request.train_data_path).exists():
+            return {"success": False, "error": f"Training data not found: {request.train_data_path}"}
+        if not Path(request.val_data_path).exists():
+            return {"success": False, "error": f"Validation data not found: {request.val_data_path}"}
+        
+        # Load datasets
+        logger.info(f"Loading datasets for optimization...")
+        train_examples = load_dataset(request.train_data_path)
+        val_examples = load_dataset(request.val_data_path)
+        
+        if not train_examples or not val_examples:
+            return {"success": False, "error": "No examples found in datasets"}
+        
+        # Configure DSPy
+        configure_dspy_lm()
+        
+        # Select metric
+        metric_map = {
+            'accuracy': classification_accuracy,
+            'weighted': weighted_accuracy,
+            'combined': combined_metric
+        }
+        metric_fn = metric_map.get(request.metric, classification_accuracy)
+        
+        # Run optimization
+        logger.info(f"Starting {request.optimizer} optimization...")
+        
+        if request.optimizer == 'bootstrap':
+            optimized = optimize_with_bootstrap_fewshot(
+                train_examples, val_examples,
+                metric=metric_fn,
+                max_bootstrapped_demos=request.max_demos,
+                use_cot=request.use_cot
+            )
+        elif request.optimizer == 'random_search':
+            optimized = optimize_with_random_search(
+                train_examples, val_examples,
+                metric=metric_fn,
+                max_bootstrapped_demos=request.max_demos,
+                use_cot=request.use_cot
+            )
+        elif request.optimizer == 'mipro':
+            optimized = optimize_with_mipro(
+                train_examples, val_examples,
+                metric=metric_fn,
+                use_cot=request.use_cot
+            )
+        else:
+            return {"success": False, "error": f"Unknown optimizer: {request.optimizer}"}
+        
+        # Save optimized classifier
+        output_path = "./data/optimized_classifier.json"
+        save_optimized_classifier(optimized, output_path)
+        
+        logger.info(f"Optimization complete, saved to {output_path}")
+        
+        return {
+            "success": True,
+            "message": "Optimization completed successfully",
+            "output_path": output_path,
+            "train_examples": len(train_examples),
+            "val_examples": len(val_examples),
+            "optimizer": request.optimizer
+        }
+        
+    except Exception as e:
+        logger.error(f"Optimization error: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.post("/api/evaluate")
+async def evaluate_classifier(request: EvaluateRequest):
+    """Evaluate classifier on a dataset.
+    
+    Returns accuracy, F1 scores, and other metrics.
+    """
+    try:
+        # Check if DSPy is available
+        try:
+            import dspy
+            from evaluation.create_dataset import load_dataset
+            from dspy_optimizer import EmailClassifierModule, load_optimized_classifier
+            from dspy_metrics import evaluate_classifier
+            from dspy_config import configure_dspy_lm
+        except ImportError as e:
+            return {
+                "success": False,
+                "error": f"DSPy not available: {str(e)}"
+            }
+        
+        # Validate path
+        if not Path(request.dataset_path).exists():
+            return {"success": False, "error": f"Dataset not found: {request.dataset_path}"}
+        
+        # Load dataset
+        logger.info(f"Loading evaluation dataset...")
+        examples = load_dataset(request.dataset_path)
+        
+        if not examples:
+            return {"success": False, "error": "No examples found in dataset"}
+        
+        # Configure DSPy
+        configure_dspy_lm()
+        
+        # Load classifier
+        if request.use_optimized:
+            optimized_path = "./data/optimized_classifier.json"
+            if not Path(optimized_path).exists():
+                return {"success": False, "error": "No optimized classifier found"}
+            classifier = load_optimized_classifier(optimized_path)
+        else:
+            classifier = EmailClassifierModule(use_cot=True)
+        
+        # Evaluate
+        logger.info(f"Evaluating classifier...")
+        results = evaluate_classifier(classifier, examples)
+        
+        return {
+            "success": True,
+            "results": results,
+            "num_examples": len(examples),
+            "classifier_type": "optimized" if request.use_optimized else "baseline"
+        }
+        
+    except Exception as e:
+        logger.error(f"Evaluation error: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/api/few-shot-examples")
+async def get_few_shot_examples(limit: int = 10, category: Optional[str] = None):
+    """Get few-shot examples from the example store."""
+    try:
+        from prompt_service import ExampleStore
+        
+        example_store = ExampleStore(PROMPT_DB_PATH)
+        
+        if category:
+            examples = example_store.get_best_examples(category=category, k=limit)
+        else:
+            examples = example_store.get_all_examples(limit=limit)
+        
+        return {
+            "success": True,
+            "examples": examples,
+            "count": len(examples)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching examples: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.post("/api/few-shot-examples")
+async def add_few_shot_example(
+    sender: str,
+    subject: str,
+    body: str,
+    category: str,
+    confidence: float = 1.0,
+    verified: bool = False,
+    notes: Optional[str] = None
+):
+    """Add a new few-shot example to the store."""
+    try:
+        from prompt_service import ExampleStore
+        
+        example_store = ExampleStore(PROMPT_DB_PATH)
+        
+        example_id = example_store.add_example(
+            sender=sender,
+            subject=subject,
+            body=body,
+            category=category,
+            confidence=confidence,
+            verified=verified,
+            notes=notes
+        )
+        
+        return {
+            "success": True,
+            "example_id": example_id,
+            "message": "Example added successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error adding example: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.delete("/api/few-shot-examples/{example_id}")
+async def delete_few_shot_example(example_id: int):
+    """Delete a few-shot example."""
+    try:
+        from prompt_service import ExampleStore
+        
+        example_store = ExampleStore(PROMPT_DB_PATH)
+        example_store.delete_example(example_id)
+        
+        return {
+            "success": True,
+            "message": f"Example {example_id} deleted"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error deleting example: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+@app.get("/api/example-store-stats")
+async def get_example_store_stats():
+    """Get statistics about the example store."""
+    try:
+        from prompt_service import ExampleStore
+        
+        example_store = ExampleStore(PROMPT_DB_PATH)
+        stats = example_store.get_statistics()
+        
+        return {
+            "success": True,
+            "stats": stats
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching stats: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+# ============================================================================
 # Startup/Shutdown Events
 # ============================================================================
 

@@ -24,6 +24,12 @@
             <button class="tab-button" onclick="showTab('stats')">
                 📊 Statistics
             </button>
+            <button class="tab-button" onclick="showTab('optimize')">
+                🚀 Optimize
+            </button>
+            <button class="tab-button" onclick="showTab('examples')">
+                📚 Examples
+            </button>
             <button class="tab-button" onclick="showTab('gmail')">
                 🔐 Gmail Auth
             </button>
@@ -111,6 +117,154 @@
                 </div>
 
                 <div id="stats-display"></div>
+            </div>
+        </div>
+
+        <!-- Optimize Tab -->
+        <div id="optimize-tab" class="tab-content">
+            <div class="card">
+                <h2>DSPy Classifier Optimization</h2>
+                <p class="help-text">
+                    Use DSPy to automatically optimize your classifier prompts using training data.
+                    This improves accuracy through few-shot learning and prompt engineering.
+                </p>
+
+                <div class="form-group">
+                    <label>Training Dataset:</label>
+                    <input type="text" id="train-dataset" placeholder="./data/eval_dataset_train.json" value="./data/eval_dataset_train.json">
+                    <p class="help-text-small">Path to training dataset (JSON format)</p>
+                </div>
+
+                <div class="form-group">
+                    <label>Validation Dataset:</label>
+                    <input type="text" id="val-dataset" placeholder="./data/eval_dataset_val.json" value="./data/eval_dataset_val.json">
+                    <p class="help-text-small">Path to validation dataset (JSON format)</p>
+                </div>
+
+                <div class="form-group inline">
+                    <label>Optimizer:</label>
+                    <select id="optimizer-type">
+                        <option value="bootstrap" selected>Bootstrap FewShot (Fast)</option>
+                        <option value="random_search">Random Search (Better)</option>
+                        <option value="mipro">MIPRO (Best, Slow)</option>
+                    </select>
+                </div>
+
+                <div class="form-group inline">
+                    <label>Metric:</label>
+                    <select id="optimize-metric">
+                        <option value="accuracy" selected>Accuracy</option>
+                        <option value="weighted">Weighted Accuracy</option>
+                        <option value="combined">Combined</option>
+                    </select>
+                </div>
+
+                <div class="form-group inline">
+                    <label>Max Few-Shot Examples:</label>
+                    <input type="number" id="max-demos" value="5" min="1" max="10">
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="use-cot" checked>
+                        Use Chain-of-Thought Reasoning
+                    </label>
+                </div>
+
+                <button class="button button-primary" onclick="runOptimization()">
+                    🚀 Start Optimization
+                </button>
+
+                <div id="optimize-loading" class="loading" style="display: none;">
+                    <div class="spinner"></div>
+                    <p>Running optimization... This may take several minutes.</p>
+                </div>
+
+                <div id="optimize-results"></div>
+            </div>
+        </div>
+
+        <!-- Examples Tab -->
+        <div id="examples-tab" class="tab-content">
+            <div class="card">
+                <h2>Few-Shot Examples</h2>
+                <p class="help-text">
+                    Manage high-quality examples for few-shot learning.
+                    These examples help the classifier learn patterns.
+                </p>
+
+                <!-- Example Store Stats -->
+                <div id="example-stats" style="margin-bottom: 20px;">
+                    <button class="button button-small" onclick="loadExampleStats()">
+                        🔄 Refresh Stats
+                    </button>
+                </div>
+
+                <!-- Add New Example Form -->
+                <div class="card" style="background: #f8f9fa; margin-bottom: 20px;">
+                    <h3>Add New Example</h3>
+                    <div class="form-group">
+                        <label>Sender:</label>
+                        <input type="text" id="example-sender" placeholder="sender@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>Subject:</label>
+                        <input type="text" id="example-subject" placeholder="Email subject">
+                    </div>
+                    <div class="form-group">
+                        <label>Body:</label>
+                        <textarea id="example-body" rows="3" placeholder="Email body..."></textarea>
+                    </div>
+                    <div class="form-group inline">
+                        <label>Category:</label>
+                        <select id="example-category">
+                            <option value="ecommerce">Ecommerce</option>
+                            <option value="political">Political</option>
+                            <option value="none">None</option>
+                        </select>
+                    </div>
+                    <div class="form-group inline">
+                        <label>Confidence:</label>
+                        <input type="number" id="example-confidence" value="1.0" min="0" max="1" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="example-verified">
+                            Mark as Verified
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label>Notes (optional):</label>
+                        <input type="text" id="example-notes" placeholder="Any additional notes">
+                    </div>
+                    <button class="button button-primary" onclick="addExample()">
+                        ➕ Add Example
+                    </button>
+                </div>
+
+                <!-- Examples List -->
+                <div>
+                    <h3>Existing Examples</h3>
+                    <div class="form-group inline">
+                        <label>Filter by category:</label>
+                        <select id="examples-filter" onchange="loadExamples()">
+                            <option value="">All</option>
+                            <option value="ecommerce">Ecommerce</option>
+                            <option value="political">Political</option>
+                            <option value="none">None</option>
+                        </select>
+                        <button class="button button-small" onclick="loadExamples()">
+                            🔄 Refresh
+                        </button>
+                    </div>
+                    
+                    <div id="examples-loading" class="loading" style="display: none;">
+                        <div class="spinner"></div>
+                        <p>Loading examples...</p>
+                    </div>
+                    
+                    <div id="examples-list"></div>
+                </div>
             </div>
         </div>
 
