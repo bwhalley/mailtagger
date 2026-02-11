@@ -36,6 +36,16 @@ except ImportError:
     DSPY_AVAILABLE = False
     dspy = None
 
+# Email index and prompt service for dashboard persistence
+try:
+    from email_index import EmailIndex
+    from prompt_service import PromptService
+    EMAIL_INDEX_AVAILABLE = True
+except ImportError:
+    EMAIL_INDEX_AVAILABLE = False
+    EmailIndex = None
+    PromptService = None
+
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
 # ------- Configuration -------
@@ -73,6 +83,20 @@ RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "2.0"))
 
 # DSPy settings
 USE_DSPY = os.getenv("USE_DSPY", "false").lower() in ("true", "1", "yes")
+
+# Email index (dashboard persistence)
+EMAIL_INDEX_PATH = os.getenv("EMAIL_INDEX_PATH", "./data/emails.db")
+PROMPT_DB_PATH = os.getenv("PROMPT_DB_PATH", "./data/prompts.db")
+
+# Tier 2: max chars for snippet-only classification (saves tokens)
+TIER2_SNIPPET_MAX = int(os.getenv("TIER2_SNIPPET_MAX", "2000"))
+
+# Tier 1: keyword heuristics for transactional (high priority)
+TRANSACTIONAL_KEYWORDS = [
+    "receipt", "receipt for", "order confirm", "order confirmed",
+    "shipped", "shipping confirm", "delivery update", "transaction",
+    "payment receiv", "purchase confirm", "your order", "tracking number",
+]
 
 # ------- Global State -------
 shutdown_requested = False
@@ -871,6 +895,90 @@ def label_thread(svc, thread_id: str, add_label_ids):
     body = {"addLabelIds": add_label_ids, "removeLabelIds": []}
     return svc.users().threads().modify(userId='me', id=thread_id, body=body).execute()
 
+
+def _apply_tier1_rules(sender: str, subject: str, snippet: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Tier 1: Apply sender rules and keyword heuristics (no LLM).
+    Returns (priority, category, reason) if we should SKIP the LLM (blocklist match).
+    Returns None if the LLM should be called.
+    """
+    if not EMAIL_INDEX_AVAILABLE:
+        return None
+    try:
+        prompt_svc = PromptService(PROMPT_DB_PATH)
+        sender_result = prompt_svc.get_priority_for_sender(sender)
+        if sender_result:
+            priority, rule_type = sender_result
+            if rule_type == "blocklist":
+                return ("low", "blocklist", f"Sender blocklisted: {sender[:50]}")
+        return None
+    except Exception:
+        return None
+
+
+def _check_transactional_keywords(subject: str, snippet: str) -> bool:
+    """Check if email looks transactional from keywords (for priority boost)."""
+    content = f"{subject} {snippet}".lower()
+    return any(kw in content for kw in TRANSACTIONAL_KEYWORDS)
+
+
+def _persist_to_index(
+    gmail_id: str,
+    thread_id: str,
+    sender: str,
+    subject: str,
+    snippet: str = "",
+    body_text: str = "",
+    received_at: Optional[str] = None,
+    label_ids: Optional[list] = None,
+    category: str = "none",
+    confidence: float = 0,
+    reason: str = "",
+):
+    """Persist classified email to local index for dashboard."""
+    index = EmailIndex(EMAIL_INDEX_PATH)
+    prompt_svc = PromptService(PROMPT_DB_PATH)
+
+    # Priority: Tier 1 rules override category-based
+    if category == "blocklist":
+        priority = "low"
+    else:
+        sender_result = prompt_svc.get_priority_for_sender(sender)
+        if sender_result:
+            priority = sender_result[0]
+        elif _check_transactional_keywords(subject, snippet):
+            priority = "high"
+        else:
+            priority = prompt_svc.get_priority_for_category(category)
+
+    # Convert Gmail internalDate (ms since epoch) to ISO
+    iso_date = None
+    if received_at:
+        try:
+            ts_ms = int(received_at)
+            iso_date = datetime.utcfromtimestamp(ts_ms / 1000.0).isoformat() + "Z"
+        except (ValueError, TypeError):
+            iso_date = received_at
+
+    index.upsert(
+        gmail_id=gmail_id,
+        thread_id=thread_id,
+        sender=sender,
+        subject=subject,
+        snippet=snippet,
+        body_text=body_text,
+        received_at=iso_date,
+        labels=label_ids,
+        priority=priority,
+        urgency="medium",
+        relevance=confidence,
+        categories=[category],
+        classification=category,
+        confidence=confidence,
+        reason=reason,
+    )
+
+
 def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbose=False, daemon_mode=False) -> int:
     """
     Run one iteration of email processing. Returns number of processed emails.
@@ -945,13 +1053,21 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
             headers = payload.get('headers', [])
             subject, sender = get_subject_and_from(headers)
             text = extract_text_from_payload(payload) or ""
-            snippet = safe_snippet(text, 4000)
+            snippet = safe_snippet(text, TIER2_SNIPPET_MAX)
             
             if verbose:
                 logger.debug(f"Extracted text length: {len(text)} chars, snippet: {len(snippet)} chars")
 
-            logger.debug(f"Classifying: '{subject[:60]}...' from {sender}")
-            result = call_llm_classifier(subject, snippet, sender, verbose)
+            # Tier 1: Check if we can skip LLM (blocklist)
+            tier1_result = _apply_tier1_rules(sender, subject, snippet)
+            if tier1_result:
+                priority, category, reason = tier1_result
+                result = {"category": category, "reason": reason, "confidence": 0.9}
+                logger.info(f"[Tier1 skip] {priority}: {subject[:60]}... ({reason})")
+            else:
+                # Tier 2: Lightweight LLM (subject + snippet)
+                logger.debug(f"Classifying: '{subject[:60]}...' from {sender}")
+                result = call_llm_classifier(subject, snippet, sender, verbose)
             
             # Collect performance metrics if available (stored in result metadata)
             if verbose and isinstance(result, dict) and '_metrics' in result:
@@ -965,6 +1081,25 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
             category = (result.get("category") or "none").lower()
             confidence = float(result.get("confidence", 0))
             reason = result.get("reason", "")
+
+            # Persist to email index for dashboard
+            if EMAIL_INDEX_AVAILABLE:
+                try:
+                    _persist_to_index(
+                        gmail_id=first["id"],
+                        thread_id=tid,
+                        sender=sender,
+                        subject=subject,
+                        snippet=safe_snippet(text, 500),
+                        body_text=text[:2000] if text else "",
+                        received_at=first.get("internalDate"),
+                        label_ids=first.get("labelIds", []),
+                        category=category,
+                        confidence=confidence,
+                        reason=reason,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist to email index: {e}")
 
             add_ids = [labels_map[LABEL_TRIAGED]]
             if category == "political":

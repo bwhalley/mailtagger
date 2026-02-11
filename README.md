@@ -44,10 +44,31 @@ cp env.example .env
 - Enable **Gmail API** in Google Cloud, create Desktop OAuth client, save as `credentials.json`
 - First run opens a browser to authorize; `token.json` is then saved for future runs
 
-### 4. Run
+### 4. Install Dependencies & Run
 ```bash
+# Option A: Virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -r requirements.txt -r requirements-api.txt
+
+# Option B: Quick restart script
+./scripts/restart.sh
+source .venv/bin/activate
+
+# Run categorizer
 python3 gmail_categorizer.py --dry-run
 python3 gmail_categorizer.py
+
+# Run API + web UI (optional)
+python3 api.py   # API on http://localhost:8000
+# Serve web/ with any static server (e.g. nginx, or python -m http.server 8080)
+```
+
+### 5. Docker Restart
+```bash
+docker compose down
+docker compose build --no-cache
+docker compose up -d
 ```
 
 ## 🔒 Security Features

@@ -31,6 +31,8 @@ function showTab(tabName) {
     // Load data for the tab
     if (tabName === 'edit') {
         loadPrompt();
+    } else if (tabName === 'dashboard') {
+        loadDashboardData();
     } else if (tabName === 'stats') {
         loadStats();
     } else if (tabName === 'gmail') {
@@ -361,6 +363,190 @@ function displayStats(data) {
     `;
     
     container.innerHTML = html;
+}
+
+// ============================================================================
+// Dashboard Functions
+// ============================================================================
+
+async function loadDashboardData() {
+    const loadingDiv = document.getElementById('dashboard-loading');
+    const summaryDiv = document.getElementById('dashboard-summary');
+    loadingDiv.style.display = 'block';
+
+    try {
+        const [summaryRes, emailsRes, groupsRes] = await Promise.all([
+            fetch(`${API_URL}/api/dashboard`),
+            fetch(`${API_URL}/api/emails?limit=30`),
+            fetch(`${API_URL}/api/emails/grouped?limit=15&min_count=1`)
+        ]);
+
+        if (!summaryRes.ok || !emailsRes.ok || !groupsRes.ok) {
+            const err = !summaryRes.ok ? await summaryRes.json() : { detail: 'Dashboard not available' };
+            throw new Error(err.detail || 'Failed to load dashboard');
+        }
+
+        const summaryData = await summaryRes.json();
+        const emailsData = await emailsRes.json();
+        const groupsData = await groupsRes.json();
+
+        displayDashboardSummary(summaryData.summary || summaryData);
+        displayDashboardEmails(emailsData.emails || []);
+        displayDashboardGroups(groupsData.groups || []);
+    } catch (error) {
+        summaryDiv.innerHTML = `
+            <div class="status status-error">
+                ${error.message}
+                <br><br>Run the categorizer to index emails: <code>python3 gmail_categorizer.py</code>
+            </div>
+        `;
+        document.getElementById('dashboard-emails').innerHTML = '';
+        document.getElementById('dashboard-groups').innerHTML = '';
+    } finally {
+        loadingDiv.style.display = 'none';
+    }
+}
+
+function displayDashboardSummary(summary) {
+    const div = document.getElementById('dashboard-summary');
+    const byPri = summary.by_priority || {};
+    const html = `
+        <div class="stats-grid" style="margin-bottom: 15px;">
+            <div class="stat-card">
+                <div class="stat-value">${summary.total || 0}</div>
+                <div class="stat-label">Total Indexed</div>
+            </div>
+            <div class="stat-card" style="border-left: 3px solid #28a745;">
+                <div class="stat-value">${byPri.high || 0}</div>
+                <div class="stat-label">High Priority</div>
+            </div>
+            <div class="stat-card" style="border-left: 3px solid #ffc107;">
+                <div class="stat-value">${byPri.medium || 0}</div>
+                <div class="stat-label">Medium</div>
+            </div>
+            <div class="stat-card" style="border-left: 3px solid #6c757d;">
+                <div class="stat-value">${byPri.low || 0}</div>
+                <div class="stat-label">Low</div>
+            </div>
+        </div>
+    `;
+    div.innerHTML = html;
+}
+
+function displayDashboardEmails(emails) {
+    const div = document.getElementById('dashboard-emails');
+    if (!emails || emails.length === 0) {
+        div.innerHTML = `
+            <div class="status status-info">
+                No emails indexed yet. Run the categorizer to populate.
+            </div>
+        `;
+        return;
+    }
+    const html = `
+        <div class="result-list">
+            ${emails.slice(0, 20).map(e => `
+                <div class="result-item">
+                    <div class="result-header">
+                        <span class="result-category priority-${e.priority || 'medium'}">
+                            ${(e.priority || 'medium').toUpperCase()}
+                        </span>
+                        <span style="font-size: 0.85em; color: #666;">
+                            ${e.received_at ? new Date(e.received_at).toLocaleDateString() : ''}
+                        </span>
+                    </div>
+                    <div class="result-subject">${escapeHtml((e.subject || '').substring(0, 80))}${(e.subject || '').length > 80 ? '...' : ''}</div>
+                    <div class="result-from">${escapeHtml(e.sender || '')}</div>
+                    ${e.snippet ? `<div class="result-reason" style="font-size: 0.9em;">${escapeHtml(e.snippet.substring(0, 100))}...</div>` : ''}
+                </div>
+            `).join('')}
+        </div>
+    `;
+    div.innerHTML = html;
+}
+
+function displayDashboardGroups(groups) {
+    const div = document.getElementById('dashboard-groups');
+    if (!groups || groups.length === 0) {
+        div.innerHTML = `
+            <div class="status status-info">
+                No sender groupings yet.
+            </div>
+        `;
+        return;
+    }
+    const html = `
+        <div class="result-list">
+            ${groups.map(g => `
+                <div class="result-item">
+                    <div class="result-header">
+                        <span class="result-category">${g.count} email${g.count !== 1 ? 's' : ''}</span>
+                    </div>
+                    <div class="result-from">${escapeHtml(g.sender || g.sender_domain || '')}</div>
+                    <div class="result-subject" style="font-size: 0.9em; color: #666;">
+                        Latest: ${escapeHtml((g.latest_subject || '').substring(0, 60))}${(g.latest_subject || '').length > 60 ? '...' : ''}
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+    div.innerHTML = html;
+}
+
+async function loadDashboardEmails() {
+    const priority = document.getElementById('dashboard-priority').value;
+    const category = document.getElementById('dashboard-category').value;
+    let url = `${API_URL}/api/emails?limit=30`;
+    if (priority) url += `&priority=${priority}`;
+    if (category) url += `&category=${category}`;
+
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        if (data.success) {
+            displayDashboardEmails(data.emails || []);
+        }
+    } catch (error) {
+        document.getElementById('dashboard-emails').innerHTML = `
+            <div class="status status-error">${error.message}</div>
+        `;
+    }
+}
+
+async function searchDashboard() {
+    const q = document.getElementById('dashboard-search').value.trim();
+    if (q.length < 2) {
+        alert('Enter at least 2 characters to search');
+        return;
+    }
+    const resultsDiv = document.getElementById('dashboard-search-results');
+    const listDiv = document.getElementById('dashboard-search-list');
+
+    try {
+        const res = await fetch(`${API_URL}/api/search?q=${encodeURIComponent(q)}&limit=20`);
+        const data = await res.json();
+        resultsDiv.style.display = 'block';
+
+        if (data.success && data.emails && data.emails.length > 0) {
+            listDiv.innerHTML = `
+                <div class="result-list">
+                    ${data.emails.map(e => `
+                        <div class="result-item">
+                            <div class="result-header">
+                                <span class="result-category priority-${e.priority || 'medium'}">${(e.priority || 'medium').toUpperCase()}</span>
+                            </div>
+                            <div class="result-subject">${escapeHtml(e.subject || '')}</div>
+                            <div class="result-from">${escapeHtml(e.sender || '')}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        } else {
+            listDiv.innerHTML = `<div class="status status-info">No results for "${escapeHtml(q)}"</div>`;
+        }
+    } catch (error) {
+        listDiv.innerHTML = `<div class="status status-error">${error.message}</div>`;
+    }
 }
 
 // ============================================================================

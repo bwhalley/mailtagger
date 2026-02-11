@@ -113,3 +113,53 @@ class EvaluateFaithfulness(dspy.Signature):
     unsupported_claims: str = dspy.OutputField(
         desc="List of claims in reasoning not supported by email content"
     )
+
+
+class EmailTriage(dspy.Signature):
+    """Triage email for priority, urgency, and flexible categories.
+    
+    Used for Tier 2 lightweight LLM processing with subject + snippet only.
+    Outputs priority (high/medium/low), urgency, relevance, and categories
+    for dashboard grouping and filtering.
+    """
+    
+    sender = dspy.InputField(desc="Email sender address")
+    subject = dspy.InputField(desc="Email subject line")
+    snippet = dspy.InputField(desc="Short snippet or first 300 chars of body")
+    
+    priority: Literal["high", "medium", "low"] = dspy.OutputField(
+        desc="Overall priority: high for receipts/transactions/personal/critical, "
+             "low for political/news/marketing, medium otherwise"
+    )
+    urgency: Literal["high", "medium", "low"] = dspy.OutputField(
+        desc="Time sensitivity: high if needs quick action, low if can wait"
+    )
+    relevance: float = dspy.OutputField(
+        desc="Relevance score 0.0 to 1.0 for how likely the user cares about this email"
+    )
+    categories: str = dspy.OutputField(
+        desc="Comma-separated categories: receipts, transactions, personal, critical, "
+             "political, news, marketing, ecommerce, other"
+    )
+    reason: str = dspy.OutputField(
+        desc="Brief explanation for the triage decision"
+    )
+
+
+class EmailSummary(dspy.Signature):
+    """Generate headline and summary for an email.
+    
+    Used for Tier 3 full LLM processing on high-priority emails or on demand.
+    Produces a short headline and one-sentence summary for dashboard display.
+    """
+    
+    sender = dspy.InputField(desc="Email sender address")
+    subject = dspy.InputField(desc="Email subject line")
+    body = dspy.InputField(desc="Email body text")
+    
+    headline: str = dspy.OutputField(
+        desc="Short catchy headline (5-10 words) capturing the key point"
+    )
+    summary: str = dspy.OutputField(
+        desc="One-sentence summary of the email content and any action needed"
+    )
