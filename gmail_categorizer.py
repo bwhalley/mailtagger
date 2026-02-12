@@ -123,6 +123,14 @@ def setup_logging(level: str = "INFO"):
 
 logger = setup_logging(LOG_LEVEL)
 
+if EMAIL_INDEX_AVAILABLE:
+    logger.info("Email index available - dashboard persistence enabled")
+else:
+    logger.warning(
+        "Email index unavailable (email_index or prompt_service import failed). "
+        "Dashboard persistence disabled. Rebuild mailtagger container."
+    )
+
 # ------- Signal Handlers -------
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully."""
