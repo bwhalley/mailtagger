@@ -15,10 +15,10 @@
 
         <!-- Tab Navigation -->
         <nav class="tabs">
-            <button class="tab-button" onclick="showTab('dashboard')">
+            <button class="tab-button active" onclick="showTab('dashboard')">
                 📬 Dashboard
             </button>
-            <button class="tab-button active" onclick="showTab('edit')">
+            <button class="tab-button" onclick="showTab('edit')">
                 ✏️ Edit Prompt
             </button>
             <button class="tab-button" onclick="showTab('test')">
@@ -102,7 +102,7 @@
         </div>
 
         <!-- Edit Tab -->
-        <div id="edit-tab" class="tab-content active">
+        <div id="edit-tab" class="tab-content">
             <div class="card">
                 <h2>Edit Classification Prompt</h2>
                 <div class="form-group">

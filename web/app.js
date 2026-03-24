@@ -1009,9 +1009,9 @@ async function deleteExample(exampleId) {
 // Initialization
 // ============================================================================
 
-// Load prompt on page load
+// Load dashboard on page load
 document.addEventListener('DOMContentLoaded', () => {
-    loadPrompt();
+    showTab('dashboard');
     
     // Check for OAuth callback result
     const urlParams = new URLSearchParams(window.location.search);
