@@ -9,8 +9,8 @@ import {
   revokeGmailOAuth,
   searchEmails,
   startGmailOAuth
-} from "./lib/api";
-import { groupEmailsForInbox } from "./lib/adapters";
+} from "./api";
+import { groupEmailsForInbox } from "./adapters";
 import type { DashboardSummary, GmailStatus, UiEmailGroup } from "./types";
 
 const laneMeta = {
