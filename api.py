@@ -37,6 +37,7 @@ except ImportError:
 
 # Configuration
 PROMPT_DB_PATH = os.getenv("PROMPT_DB_PATH", "./data/prompts.db")
+EMAIL_INDEX_PATH = os.getenv("EMAIL_INDEX_PATH", "./data/emails.db")
 DAEMON_PID_FILE = os.getenv("DAEMON_PID_FILE", "./data/daemon.pid")
 CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH", ".")
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -60,8 +61,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize prompt service
+# Initialize prompt service and email index
 prompt_service = PromptService(PROMPT_DB_PATH)
+try:
+    from email_index import EmailIndex
+    email_index = EmailIndex(EMAIL_INDEX_PATH)
+    EMAIL_INDEX_AVAILABLE = True
+except ImportError:
+    email_index = None
+    EMAIL_INDEX_AVAILABLE = False
 
 # Setup logging
 import logging
@@ -120,7 +128,11 @@ async def root():
             "POST /api/test": "Test prompt on sample emails",
             "GET /api/test-results": "Get recent test results",
             "GET /api/stats": "Get performance statistics",
-            "POST /api/reload": "Signal daemon to reload prompt"
+            "POST /api/reload": "Signal daemon to reload prompt",
+            "GET /api/dashboard": "Dashboard summary",
+            "GET /api/emails": "List indexed emails",
+            "GET /api/emails/grouped": "Emails grouped by sender",
+            "GET /api/search": "Search emails"
         }
     }
 
@@ -337,8 +349,106 @@ async def health_check():
         "timestamp": datetime.now().isoformat(),
         "gmail_available": GMAIL_AVAILABLE,
         "prompt_db": os.path.exists(PROMPT_DB_PATH),
+        "email_index_available": EMAIL_INDEX_AVAILABLE,
         "oauth_available": OAUTH_AVAILABLE
     }
+
+
+# ============================================================================
+# Email Dashboard Endpoints
+# ============================================================================
+
+@app.get("/api/dashboard")
+async def get_dashboard():
+    """Get dashboard summary (counts by priority and classification)."""
+    if not EMAIL_INDEX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Email index not available"
+        )
+    try:
+        summary = email_index.get_dashboard_summary()
+        return {"success": True, "summary": summary}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/emails")
+async def get_emails(
+    limit: int = 50,
+    offset: int = 0,
+    priority: Optional[str] = None,
+    category: Optional[str] = None,
+    sender_domain: Optional[str] = None,
+):
+    """Get recent emails with optional filters."""
+    if not EMAIL_INDEX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Email index not available"
+        )
+    try:
+        emails = email_index.get_recent(
+            limit=limit,
+            offset=offset,
+            priority=priority,
+            category=category,
+            sender_domain=sender_domain,
+        )
+        return {"success": True, "emails": emails, "count": len(emails)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/emails/grouped")
+async def get_emails_grouped_by_sender(
+    limit: int = 20,
+    min_count: int = 1,
+    priority: Optional[str] = None,
+):
+    """Get senders grouped by email count."""
+    if not EMAIL_INDEX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Email index not available"
+        )
+    try:
+        groups = email_index.get_grouped_by_sender(
+            limit=limit,
+            min_count=min_count,
+            priority=priority,
+        )
+        return {"success": True, "groups": groups}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/search")
+async def search_emails(
+    q: str,
+    limit: int = 20,
+    priority: Optional[str] = None,
+):
+    """Search emails by subject, sender, or snippet."""
+    if not EMAIL_INDEX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Email index not available"
+        )
+    if not q or len(q.strip()) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Query must be at least 2 characters"
+        )
+    try:
+        emails = email_index.search(
+            q=q.strip(),
+            limit=limit,
+            priority=priority,
+        )
+        return {"success": True, "emails": emails, "count": len(emails)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================

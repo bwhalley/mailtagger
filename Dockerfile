@@ -25,7 +25,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY gmail_categorizer.py .
+COPY gmail_categorizer.py email_index.py prompt_service.py .
 
 # Create data directory for persistent storage
 RUN mkdir -p /app/data && \

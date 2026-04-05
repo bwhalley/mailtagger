@@ -8,7 +8,7 @@ import sqlite3
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 from contextlib import contextmanager
 
 
@@ -75,7 +75,47 @@ class PromptService:
                     FOREIGN KEY (prompt_id) REFERENCES prompts(id)
                 )
             """)
-            
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sender_rules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pattern VARCHAR(255) NOT NULL,
+                    priority VARCHAR(20) DEFAULT 'medium',
+                    label VARCHAR(100),
+                    rule_type VARCHAR(20) NOT NULL DEFAULT 'allowlist',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS priority_config (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    category VARCHAR(100) NOT NULL UNIQUE,
+                    default_priority VARCHAR(20) DEFAULT 'medium',
+                    is_high_value BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # Seed default priority config for known categories
+            cursor = conn.execute("SELECT COUNT(*) as count FROM priority_config")
+            if cursor.fetchone()["count"] == 0:
+                defaults = [
+                    ("receipts", "high", True),
+                    ("transactions", "high", True),
+                    ("personal", "high", True),
+                    ("critical", "high", True),
+                    ("political", "low", False),
+                    ("news", "low", False),
+                    ("marketing", "low", False),
+                    ("ecommerce", "low", False),
+                    ("blocklist", "low", False),
+                ]
+                conn.executemany(
+                    "INSERT INTO priority_config (category, default_priority, is_high_value) VALUES (?, ?, ?)",
+                    defaults,
+                )
+
             # Create default prompt if none exists
             cursor = conn.execute("SELECT COUNT(*) as count FROM prompts")
             if cursor.fetchone()["count"] == 0:
@@ -264,6 +304,89 @@ Be conservative and only pick 'political' if clearly political."""
                 """DELETE FROM test_results 
                    WHERE test_date < datetime('now', '-' || ? || ' days')""",
                 (days,)
+            )
+
+    # ---- Sender rules ----
+
+    def get_sender_rules(self) -> List[Dict[str, Any]]:
+        """Get all sender rules."""
+        with self.get_db() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM sender_rules ORDER BY rule_type, pattern"
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def add_sender_rule(
+        self,
+        pattern: str,
+        priority: str = "medium",
+        label: Optional[str] = None,
+        rule_type: str = "allowlist",
+    ) -> int:
+        """Add a sender rule (allowlist or blocklist)."""
+        with self.get_db() as conn:
+            cursor = conn.execute(
+                """INSERT INTO sender_rules (pattern, priority, label, rule_type)
+                   VALUES (?, ?, ?, ?)""",
+                (pattern, priority, label, rule_type),
+            )
+            return cursor.lastrowid
+
+    def delete_sender_rule(self, rule_id: int):
+        """Delete a sender rule."""
+        with self.get_db() as conn:
+            conn.execute("DELETE FROM sender_rules WHERE id = ?", (rule_id,))
+
+    def get_priority_for_sender(self, sender: str) -> Optional[Tuple[str, str]]:
+        """
+        Check sender against rules. Returns (priority, rule_type) if matched.
+        allowlist = high-value sender; blocklist = low-value.
+        """
+        sender_lower = sender.lower()
+        with self.get_db() as conn:
+            for row in conn.execute("SELECT * FROM sender_rules ORDER BY id"):
+                pattern = row["pattern"].lower()
+                if pattern in sender_lower or pattern in sender_lower.split("@")[0]:
+                    if row["rule_type"] == "allowlist":
+                        return (row["priority"] or "high", "allowlist")
+                    return (row["priority"] or "low", "blocklist")
+        return None
+
+    # ---- Priority config ----
+
+    def get_priority_config(self) -> List[Dict[str, Any]]:
+        """Get all category priority config."""
+        with self.get_db() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM priority_config ORDER BY is_high_value DESC, category"
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_priority_for_category(self, category: str) -> str:
+        """Get default priority for a category."""
+        with self.get_db() as conn:
+            cursor = conn.execute(
+                "SELECT default_priority FROM priority_config WHERE category = ?",
+                (category.lower(),),
+            )
+            row = cursor.fetchone()
+            return row["default_priority"] if row else "medium"
+
+    def update_priority_config(
+        self,
+        category: str,
+        default_priority: str,
+        is_high_value: bool = False,
+    ):
+        """Insert or update priority for a category."""
+        with self.get_db() as conn:
+            conn.execute(
+                """INSERT INTO priority_config (category, default_priority, is_high_value)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(category) DO UPDATE SET
+                       default_priority = excluded.default_priority,
+                       is_high_value = excluded.is_high_value""",
+                (category.lower(), default_priority, is_high_value),
             )
 
 

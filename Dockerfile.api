@@ -17,7 +17,7 @@ COPY requirements.txt requirements-api.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-api.txt
 
 # Copy application files
-COPY gmail_categorizer.py prompt_service.py api.py ./
+COPY gmail_categorizer.py email_index.py prompt_service.py api.py ./
 
 # Create data directory
 RUN mkdir -p /app/data && chmod 755 /app/data

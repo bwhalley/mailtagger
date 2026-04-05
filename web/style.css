@@ -344,6 +344,21 @@ code {
     color: #4b5563;
 }
 
+.priority-high {
+    background: #d1fae5;
+    color: #065f46;
+}
+
+.priority-medium {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.priority-low {
+    background: #e5e7eb;
+    color: #4b5563;
+}
+
 .result-confidence {
     font-size: 0.9em;
     color: var(--text-light);
