@@ -1,0 +1,59 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 33% 96%;
+    --foreground: 220 20% 14%;
+    --card: 40 30% 98%;
+    --card-foreground: 220 20% 14%;
+    --primary: 12 76% 61%;
+    --primary-foreground: 40 33% 96%;
+    --muted: 40 20% 90%;
+    --muted-foreground: 220 10% 46%;
+    --border: 40 18% 88%;
+    --input: 40 18% 88%;
+    --ring: 12 76% 61%;
+    --radius: 0.8rem;
+
+    --lane-urgent: 12 76% 61%;
+    --lane-urgent-soft: 12 76% 95%;
+    --lane-ready: 220 14% 46%;
+    --lane-ready-soft: 220 14% 93%;
+    --lane-auto: 152 30% 50%;
+    --lane-auto-soft: 152 30% 92%;
+  }
+
+  .dark {
+    --background: 220 20% 8%;
+    --foreground: 40 20% 92%;
+    --card: 220 18% 12%;
+    --card-foreground: 40 20% 92%;
+    --muted: 220 15% 18%;
+    --muted-foreground: 220 10% 60%;
+    --border: 220 15% 20%;
+    --input: 220 15% 20%;
+    --lane-urgent-soft: 12 76% 15%;
+    --lane-ready-soft: 220 14% 15%;
+    --lane-auto-soft: 152 30% 14%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: system-ui, -apple-system, sans-serif;
+    margin: 0;
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: "Space Grotesk", system-ui, sans-serif;
+  }
+}
