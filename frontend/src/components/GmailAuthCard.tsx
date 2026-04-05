@@ -1,5 +1,5 @@
 import { AlertTriangle, CheckCircle2, Link2, RotateCw, ShieldX } from "lucide-react";
-import type { GmailStatus } from "@/types";
+import type { GmailStatus } from "../types";
 
 interface GmailAuthCardProps {
   status: GmailStatus | null;

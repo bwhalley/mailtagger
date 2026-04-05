@@ -1,4 +1,4 @@
-import type { Lane, UiEmailGroup } from "@/types";
+import type { Lane, UiEmailGroup } from "../types";
 import { EmailGroupCard } from "./EmailGroupCard";
 
 interface LaneSectionProps {

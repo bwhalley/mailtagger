@@ -1,7 +1,7 @@
 import { Inbox, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { GmailAuthCard } from "@/components/GmailAuthCard";
-import { LaneSection } from "@/components/LaneSection";
+import { GmailAuthCard } from "./components/GmailAuthCard";
+import { LaneSection } from "./components/LaneSection";
 import {
   getDashboardSummary,
   getGmailStatus,
@@ -9,9 +9,9 @@ import {
   revokeGmailOAuth,
   searchEmails,
   startGmailOAuth
-} from "@/lib/api";
-import { groupEmailsForInbox } from "@/lib/adapters";
-import type { DashboardSummary, GmailStatus, UiEmailGroup } from "@/types";
+} from "./lib/api";
+import { groupEmailsForInbox } from "./lib/adapters";
+import type { DashboardSummary, GmailStatus, UiEmailGroup } from "./types";
 
 const laneMeta = {
   urgent: {

@@ -1,6 +1,6 @@
 import { ChevronDown, Mail, Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { UiEmailGroup } from "@/types";
+import type { UiEmailGroup } from "../types";
 
 const laneClass: Record<UiEmailGroup["lane"], string> = {
   urgent: "border-lane-urgent/50",
