@@ -1,8 +1,9 @@
-import type { ApiEmail, DashboardSummary, GmailStatus } from "./types";
+import type { ApiEmail, ApiSender, DashboardSummary, GmailStatus, SenderStatus } from "./types";
 
 interface ApiEnvelope<T> {
   success: boolean;
   emails?: T;
+  senders?: T;
   summary?: DashboardSummary;
   detail?: string;
 }
@@ -82,4 +83,27 @@ export async function revokeGmailOAuth(): Promise<{ success: boolean; message: s
   return requestJson<{ success: boolean; message: string }>("/api/gmail/revoke", {
     method: "POST"
   });
+}
+
+export async function getSenders(status?: SenderStatus, limit = 50): Promise<ApiSender[]> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (status) params.set("status", status);
+  const response = await requestJson<ApiEnvelope<ApiSender[]>>(`/api/senders?${params.toString()}`);
+  if (!response.success || !response.senders) {
+    return [];
+  }
+  return response.senders;
+}
+
+export async function updateSenderStatus(
+  senderId: number,
+  status: SenderStatus
+): Promise<ApiSender> {
+  const response = await requestJson<{ success: boolean; sender: ApiSender }>(`/api/senders/${senderId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status })
+  });
+  return response.sender;
 }

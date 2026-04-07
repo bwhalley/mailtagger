@@ -6,12 +6,14 @@ import {
   getDashboardSummary,
   getGmailStatus,
   getRecentEmails,
+  getSenders,
   revokeGmailOAuth,
   searchEmails,
-  startGmailOAuth
+  startGmailOAuth,
+  updateSenderStatus
 } from "./api";
 import { groupEmailsForInbox } from "./adapters";
-import type { DashboardSummary, GmailStatus, UiEmailGroup } from "./types";
+import type { ApiSender, DashboardSummary, GmailStatus, SenderStatus, UiEmailGroup } from "./types";
 
 const laneMeta = {
   urgent: {
@@ -32,6 +34,7 @@ function App() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [groups, setGroups] = useState<UiEmailGroup[]>([]);
   const [gmailStatus, setGmailStatus] = useState<GmailStatus | null>(null);
+  const [newSenders, setNewSenders] = useState<ApiSender[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -47,12 +50,14 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      const [summaryData, statusData] = await Promise.all([
+      const [summaryData, statusData, newSenderData] = await Promise.all([
         getDashboardSummary(),
-        getGmailStatus()
+        getGmailStatus(),
+        getSenders("new", 15)
       ]);
       setSummary(summaryData);
       setGmailStatus(statusData);
+      setNewSenders(newSenderData);
       await loadDashboard();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load Mailtagger data.");
@@ -90,6 +95,20 @@ function App() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 4);
   }, [summary]);
+
+  const handleSenderStatus = async (senderId: number, status: SenderStatus) => {
+    setBusy(true);
+    try {
+      await updateSenderStatus(senderId, status);
+      setActionMessage(`Sender marked as ${status}.`);
+      const [newSenderData] = await Promise.all([getSenders("new", 15), loadDashboard(search)]);
+      setNewSenders(newSenderData);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update sender status.");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const onSearchSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -200,6 +219,56 @@ function App() {
               <div className="rounded-md border border-lane-urgent/30 bg-lane-urgent-soft px-3 py-2 text-sm">
                 {error}
               </div>
+            )}
+
+            {newSenders.length > 0 && (
+              <section className="rounded-xl border border-lane-ready/25 bg-lane-ready-soft p-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="font-display text-base font-semibold">New to your inbox</h2>
+                    <p className="text-sm text-muted-foreground">
+                      First-time sender domains. Highlight what matters or keep quiet.
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-background px-2.5 py-1 text-xs font-medium">
+                    {newSenders.length}
+                  </span>
+                </div>
+                <ul className="space-y-2">
+                  {newSenders.map((sender) => (
+                    <li
+                      key={sender.id}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2"
+                    >
+                      <div>
+                        <p className="text-sm font-medium text-foreground">{sender.sender_domain}</p>
+                        <p className="text-xs text-muted-foreground">
+                          tld: .{sender.tld} · {sender.message_count} message
+                          {sender.message_count === 1 ? "" : "s"}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => handleSenderStatus(sender.id, "highlight")}
+                          className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-70"
+                        >
+                          Highlight
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => handleSenderStatus(sender.id, "quiet")}
+                          className="rounded-md bg-muted px-2.5 py-1.5 text-xs font-medium text-muted-foreground disabled:opacity-70"
+                        >
+                          Keep quiet
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             )}
 
             {loading ? (

@@ -83,6 +83,59 @@ class EmailIndex:
                 )
             """)
 
+            # Sender-level preferences/settings. This supports "new in your inbox"
+            # and future sender settings management screens.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS email_senders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender_domain VARCHAR(255) UNIQUE NOT NULL,
+                    tld TEXT NOT NULL,
+                    status VARCHAR(32) NOT NULL DEFAULT 'new',
+                    settings TEXT,
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_email_senders_domain ON email_senders(sender_domain)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_email_senders_status ON email_senders(status)"
+            )
+
+    def _extract_tld(self, sender_domain: str) -> str:
+        """Extract top-level domain segment from sender domain."""
+        if not sender_domain:
+            return ""
+        parts = sender_domain.split(".")
+        if len(parts) < 2:
+            return sender_domain.lower()
+        return parts[-1].lower()
+
+    def _upsert_sender(self, sender_domain: str):
+        """Ensure sender domain exists in email_senders and update seen counters."""
+        if not sender_domain:
+            return
+        tld = self._extract_tld(sender_domain)
+        now = datetime.utcnow().isoformat()
+        with self.get_db() as conn:
+            conn.execute(
+                """
+                INSERT INTO email_senders (
+                    sender_domain, tld, status, settings, message_count, first_seen, last_seen, updated_at
+                ) VALUES (?, ?, 'new', '{}', 1, ?, ?, ?)
+                ON CONFLICT(sender_domain) DO UPDATE SET
+                    tld = excluded.tld,
+                    message_count = email_senders.message_count + 1,
+                    last_seen = excluded.last_seen,
+                    updated_at = excluded.updated_at
+                """,
+                (sender_domain, tld, now, now, now),
+            )
+
     def _extract_domain(self, sender: str) -> str:
         """Extract domain from email address."""
         if not sender:
@@ -170,6 +223,8 @@ class EmailIndex:
             if row_id is None:
                 cursor = conn.execute("SELECT id FROM emails WHERE gmail_id = ?", (gmail_id,))
                 row_id = cursor.fetchone()["id"]
+        # Keep sender-level table fresh as we ingest and classify more email.
+        self._upsert_sender(sender_domain)
         return row_id
 
     def get_by_gmail_id(self, gmail_id: str) -> Optional[Dict[str, Any]]:
@@ -191,20 +246,25 @@ class EmailIndex:
         Get recent emails with optional filters.
         category can match classifications or categories JSON array.
         """
-        query = "SELECT * FROM emails WHERE 1=1"
+        query = """
+            SELECT e.*, s.status AS sender_status, s.settings AS sender_settings
+            FROM emails e
+            LEFT JOIN email_senders s ON e.sender_domain = s.sender_domain
+            WHERE 1=1
+        """
         params: List[Any] = []
 
         if priority:
-            query += " AND priority = ?"
+            query += " AND e.priority = ?"
             params.append(priority)
         if category:
-            query += " AND (classification = ? OR categories LIKE ?)"
+            query += " AND (e.classification = ? OR e.categories LIKE ?)"
             params.extend([category, f"%{category}%"])
         if sender_domain:
-            query += " AND sender_domain = ?"
+            query += " AND e.sender_domain = ?"
             params.append(sender_domain)
 
-        query += " ORDER BY received_at DESC, processed_at DESC LIMIT ? OFFSET ?"
+        query += " ORDER BY e.received_at DESC, e.processed_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         with self.get_db() as conn:
@@ -289,16 +349,18 @@ class EmailIndex:
         """
         pattern = f"%{q.replace('%', '%%')}%"
         query = """
-            SELECT * FROM emails
-            WHERE subject LIKE ? OR sender LIKE ? OR snippet LIKE ?
+            SELECT e.*, s.status AS sender_status, s.settings AS sender_settings
+            FROM emails e
+            LEFT JOIN email_senders s ON e.sender_domain = s.sender_domain
+            WHERE e.subject LIKE ? OR e.sender LIKE ? OR e.snippet LIKE ?
         """
         params: List[Any] = [pattern, pattern, pattern]
 
         if priority:
-            query += " AND priority = ?"
+            query += " AND e.priority = ?"
             params.append(priority)
 
-        query += " ORDER BY received_at DESC LIMIT ?"
+        query += " ORDER BY e.received_at DESC LIMIT ?"
         params.append(limit)
 
         with self.get_db() as conn:
@@ -318,7 +380,71 @@ class EmailIndex:
                 d["categories"] = json.loads(d["categories"])
             except (TypeError, json.JSONDecodeError):
                 pass
+        if d.get("sender_settings"):
+            try:
+                d["sender_settings"] = json.loads(d["sender_settings"])
+            except (TypeError, json.JSONDecodeError):
+                d["sender_settings"] = {}
         return d
+
+    def list_senders(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List sender domains and sender-level settings/status."""
+        query = "SELECT * FROM email_senders WHERE 1=1"
+        params: List[Any] = []
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY last_seen DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        with self.get_db() as conn:
+            cursor = conn.execute(query, params)
+            rows = [dict(row) for row in cursor.fetchall()]
+            for row in rows:
+                settings = row.get("settings")
+                if settings:
+                    try:
+                        row["settings"] = json.loads(settings)
+                    except (TypeError, json.JSONDecodeError):
+                        row["settings"] = {}
+                else:
+                    row["settings"] = {}
+            return rows
+
+    def update_sender_status(
+        self,
+        sender_id: int,
+        status: str,
+        settings: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update sender status/settings by id and return updated row."""
+        if status not in ("new", "highlight", "quiet"):
+            raise ValueError("status must be one of: new, highlight, quiet")
+        settings_json = json.dumps(settings or {})
+        now = datetime.utcnow().isoformat()
+        with self.get_db() as conn:
+            conn.execute(
+                """
+                UPDATE email_senders
+                SET status = ?, settings = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, settings_json, now, sender_id),
+            )
+            cursor = conn.execute("SELECT * FROM email_senders WHERE id = ?", (sender_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            try:
+                result["settings"] = json.loads(result.get("settings") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                result["settings"] = {}
+            return result
 
 
 def main():

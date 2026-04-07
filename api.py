@@ -112,6 +112,12 @@ class TestResponse(BaseModel):
     summary: Dict[str, Any]
 
 
+class SenderStatusUpdate(BaseModel):
+    """Update model for sender priority status/settings."""
+    status: str
+    settings: Optional[Dict[str, Any]] = None
+
+
 # ============================================================================
 # API Endpoints
 # ============================================================================
@@ -132,7 +138,9 @@ async def root():
             "GET /api/dashboard": "Dashboard summary",
             "GET /api/emails": "List indexed emails",
             "GET /api/emails/grouped": "Emails grouped by sender",
-            "GET /api/search": "Search emails"
+            "GET /api/search": "Search emails",
+            "GET /api/senders": "List sender-level status/preferences",
+            "PUT /api/senders/{sender_id}": "Update sender status/preferences"
         }
     }
 
@@ -447,6 +455,53 @@ async def search_emails(
             priority=priority,
         )
         return {"success": True, "emails": emails, "count": len(emails)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/senders")
+async def list_senders(
+    status: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """List sender domains with status/settings (new/highlight/quiet)."""
+    if not EMAIL_INDEX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Email index not available"
+        )
+    try:
+        senders = email_index.list_senders(status=status, limit=limit, offset=offset)
+        return {"success": True, "senders": senders, "count": len(senders)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/senders/{sender_id}")
+async def update_sender(sender_id: int, request: SenderStatusUpdate):
+    """Update sender status/settings by sender table id."""
+    if not EMAIL_INDEX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Email index not available"
+        )
+    if request.status not in ("new", "highlight", "quiet"):
+        raise HTTPException(
+            status_code=400,
+            detail="status must be one of: new, highlight, quiet"
+        )
+    try:
+        updated = email_index.update_sender_status(
+            sender_id=sender_id,
+            status=request.status,
+            settings=request.settings or {},
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="sender not found")
+        return {"success": True, "sender": updated}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

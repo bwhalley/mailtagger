@@ -1,5 +1,6 @@
 export type Priority = "high" | "medium" | "low";
 export type Lane = "urgent" | "ready" | "auto";
+export type SenderStatus = "new" | "highlight" | "quiet";
 
 export interface ApiEmail {
   id: number;
@@ -17,6 +18,8 @@ export interface ApiEmail {
   confidence?: number | null;
   reason?: string | null;
   summary?: string | null;
+  sender_status?: SenderStatus | null;
+  sender_settings?: Record<string, unknown> | string | null;
 }
 
 export interface DashboardSummary {
@@ -54,4 +57,15 @@ export interface UiEmailGroup {
   confidence: number;
   unreadCount: number;
   messages: UiMessage[];
+}
+
+export interface ApiSender {
+  id: number;
+  sender_domain: string;
+  tld: string;
+  status: SenderStatus;
+  settings: Record<string, unknown>;
+  message_count: number;
+  first_seen?: string;
+  last_seen?: string;
 }

@@ -1,11 +1,17 @@
-import type { ApiEmail, Lane, Priority, UiEmailGroup, UiMessage } from "./types";
+import type { ApiEmail, Lane, Priority, SenderStatus, UiEmailGroup, UiMessage } from "./types";
 
 const categoryFromClassification = (value?: string | null) => {
   if (!value) return "uncategorized";
   return value.toLowerCase();
 };
 
-const priorityToLane = (priority?: Priority | null, classification?: string | null): Lane => {
+const priorityToLane = (
+  priority?: Priority | null,
+  classification?: string | null,
+  senderStatus?: SenderStatus | null
+): Lane => {
+  if (senderStatus === "quiet") return "auto";
+  if (senderStatus === "highlight") return "urgent";
   if (priority === "high") return "urgent";
   if (priority === "low") return "auto";
   if (classification && ["ecommerce", "promo", "social", "receipt"].includes(classification)) {
@@ -59,7 +65,7 @@ export function groupEmailsForInbox(emails: ApiEmail[]): UiEmailGroup[] {
     const newest = sorted[0];
     const priority = (newest.priority ?? "medium") as Priority;
     const classification = categoryFromClassification(newest.classification);
-    const lane = priorityToLane(priority, classification);
+    const lane = priorityToLane(priority, classification, newest.sender_status ?? null);
 
     const messages: UiMessage[] = sorted.slice(0, 8).map((email) => ({
       id: email.gmail_id ?? String(email.id),
