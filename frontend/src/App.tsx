@@ -2,6 +2,8 @@ import { Inbox, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { GmailAuthCard } from "./components/GmailAuthCard";
 import { LaneSection } from "./components/LaneSection";
+import { SenderSettingsPage } from "./components/settings/SenderSettingsPage";
+import { SettingsOverviewPage } from "./components/settings/SettingsOverviewPage";
 import {
   getDashboardSummary,
   getGmailStatus,
@@ -32,6 +34,7 @@ const laneMeta = {
 } as const;
 
 function App() {
+  const [path, setPath] = useState<string>(() => window.location.pathname || "/");
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [groups, setGroups] = useState<UiEmailGroup[]>([]);
   const [gmailStatus, setGmailStatus] = useState<GmailStatus | null>(null);
@@ -42,6 +45,12 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+
+  const navigateTo = useCallback((nextPath: string) => {
+    if (window.location.pathname === nextPath) return;
+    window.history.pushState({}, "", nextPath);
+    setPath(nextPath);
+  }, []);
 
   const loadDashboard = useCallback(async (query?: string) => {
     const emails = query && query.trim().length >= 2 ? await searchEmails(query) : await getRecentEmails();
@@ -77,8 +86,17 @@ function App() {
   }, [loadDashboard]);
 
   useEffect(() => {
+    const onPopState = () => setPath(window.location.pathname || "/");
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (path.startsWith("/settings")) {
+      return;
+    }
     refresh();
-  }, [refresh]);
+  }, [refresh, path]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -166,11 +184,26 @@ function App() {
     }
   };
 
+  if (path.startsWith("/settings/senders")) {
+    return <SenderSettingsPage onNavigate={navigateTo} />;
+  }
+
+  if (path.startsWith("/settings")) {
+    return <SettingsOverviewPage onNavigate={navigateTo} />;
+  }
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-20 border-b border-border bg-background/90 backdrop-blur">
         <div className="container flex items-center justify-between py-3">
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigateTo("/settings")}
+              className="rounded-md bg-muted px-2.5 py-1.5 text-xs font-medium text-muted-foreground"
+            >
+              Settings
+            </button>
             <Inbox className="h-5 w-5 text-primary" />
             <h1 className="font-display text-lg font-semibold">Mailtagger Inbox</h1>
           </div>
