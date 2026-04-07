@@ -62,6 +62,8 @@ export interface UiEmailGroup {
 export interface ApiSender {
   id: number;
   sender_domain: string;
+  domain_key?: string;
+  latest_sender?: string;
   tld: string;
   status: SenderStatus;
   settings: Record<string, unknown>;

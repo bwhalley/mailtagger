@@ -107,3 +107,13 @@ export async function updateSenderStatus(
   });
   return response.sender;
 }
+
+export async function getSenderRecentEmails(senderId: number, limit = 3): Promise<ApiEmail[]> {
+  const response = await requestJson<{ success: boolean; emails: ApiEmail[] }>(
+    `/api/senders/${senderId}/emails?limit=${limit}`
+  );
+  if (!response.success || !response.emails) {
+    return [];
+  }
+  return response.emails;
+}

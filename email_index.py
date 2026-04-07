@@ -46,6 +46,7 @@ class EmailIndex:
                     thread_id VARCHAR(64) NOT NULL,
                     sender TEXT NOT NULL,
                     sender_domain VARCHAR(255),
+                    domain_key VARCHAR(255),
                     subject TEXT NOT NULL,
                     snippet TEXT,
                     body_text TEXT,
@@ -89,6 +90,8 @@ class EmailIndex:
                 CREATE TABLE IF NOT EXISTS email_senders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender_domain VARCHAR(255) UNIQUE NOT NULL,
+                    domain_key VARCHAR(255),
+                    latest_sender TEXT,
                     tld TEXT NOT NULL,
                     status VARCHAR(32) NOT NULL DEFAULT 'new',
                     settings TEXT,
@@ -105,6 +108,24 @@ class EmailIndex:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_email_senders_status ON email_senders(status)"
             )
+            # Lightweight migrations for pre-existing DBs.
+            email_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(emails)").fetchall()
+            }
+            if "domain_key" not in email_columns:
+                conn.execute("ALTER TABLE emails ADD COLUMN domain_key VARCHAR(255)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_domain_key ON emails(domain_key)")
+
+            sender_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(email_senders)").fetchall()
+            }
+            if "domain_key" not in sender_columns:
+                conn.execute("ALTER TABLE email_senders ADD COLUMN domain_key VARCHAR(255)")
+            if "latest_sender" not in sender_columns:
+                conn.execute("ALTER TABLE email_senders ADD COLUMN latest_sender TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_email_senders_domain_key ON email_senders(domain_key)"
+            )
 
     def _extract_tld(self, sender_domain: str) -> str:
         """Extract top-level domain segment from sender domain."""
@@ -115,9 +136,34 @@ class EmailIndex:
             return sender_domain.lower()
         return parts[-1].lower()
 
-    def _upsert_sender(self, sender_domain: str):
-        """Ensure sender domain exists in email_senders and update seen counters."""
+    def _extract_domain_key(self, sender_domain: str) -> str:
+        """
+        Extract registrable domain key (mail.r13.com -> r13.com).
+        Includes a small set of common second-level country suffixes.
+        """
+        domain = (sender_domain or "").strip().lower()
+        if not domain:
+            return ""
+        parts = [p for p in domain.split(".") if p]
+        if len(parts) <= 2:
+            return domain
+        second_level_suffixes = {
+            "co.uk", "org.uk", "ac.uk", "gov.uk",
+            "com.au", "net.au", "org.au",
+            "co.nz", "com.br", "com.mx",
+            "co.jp", "co.kr", "com.sg",
+        }
+        tail2 = ".".join(parts[-2:])
+        if tail2 in second_level_suffixes and len(parts) >= 3:
+            return ".".join(parts[-3:])
+        return ".".join(parts[-2:])
+
+    def _upsert_sender(self, sender_domain: str, sender: str = ""):
+        """Ensure sender domain key exists in email_senders and update seen counters."""
         if not sender_domain:
+            return
+        domain_key = self._extract_domain_key(sender_domain)
+        if not domain_key:
             return
         tld = self._extract_tld(sender_domain)
         now = datetime.utcnow().isoformat()
@@ -125,15 +171,17 @@ class EmailIndex:
             conn.execute(
                 """
                 INSERT INTO email_senders (
-                    sender_domain, tld, status, settings, message_count, first_seen, last_seen, updated_at
-                ) VALUES (?, ?, 'new', '{}', 1, ?, ?, ?)
-                ON CONFLICT(sender_domain) DO UPDATE SET
+                    sender_domain, domain_key, latest_sender, tld, status, settings, message_count, first_seen, last_seen, updated_at
+                ) VALUES (?, ?, ?, ?, 'new', '{}', 1, ?, ?, ?)
+                ON CONFLICT(domain_key) DO UPDATE SET
+                    sender_domain = excluded.sender_domain,
+                    latest_sender = excluded.latest_sender,
                     tld = excluded.tld,
                     message_count = email_senders.message_count + 1,
                     last_seen = excluded.last_seen,
                     updated_at = excluded.updated_at
                 """,
-                (sender_domain, tld, now, now, now),
+                (sender_domain, domain_key, sender, tld, now, now, now),
             )
 
     def _extract_domain(self, sender: str) -> str:
@@ -166,6 +214,7 @@ class EmailIndex:
         Insert or update an email record. Returns the row id.
         """
         sender_domain = self._extract_domain(sender)
+        domain_key = self._extract_domain_key(sender_domain)
         labels_json = json.dumps(labels) if labels else None
         categories_json = json.dumps(categories) if categories else None
 
@@ -173,14 +222,15 @@ class EmailIndex:
             cursor = conn.execute(
                 """
                 INSERT INTO emails (
-                    gmail_id, thread_id, sender, sender_domain, subject, snippet, body_text,
+                    gmail_id, thread_id, sender, sender_domain, domain_key, subject, snippet, body_text,
                     received_at, labels, priority, urgency, relevance, categories,
                     summary, classification, confidence, reason, processed_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(gmail_id) DO UPDATE SET
                     thread_id = excluded.thread_id,
                     sender = excluded.sender,
                     sender_domain = excluded.sender_domain,
+                    domain_key = excluded.domain_key,
                     subject = excluded.subject,
                     snippet = excluded.snippet,
                     body_text = excluded.body_text,
@@ -202,6 +252,7 @@ class EmailIndex:
                     thread_id,
                     sender,
                     sender_domain,
+                    domain_key,
                     subject,
                     snippet,
                     body_text,
@@ -224,7 +275,7 @@ class EmailIndex:
                 cursor = conn.execute("SELECT id FROM emails WHERE gmail_id = ?", (gmail_id,))
                 row_id = cursor.fetchone()["id"]
         # Keep sender-level table fresh as we ingest and classify more email.
-        self._upsert_sender(sender_domain)
+        self._upsert_sender(sender_domain, sender)
         return row_id
 
     def get_by_gmail_id(self, gmail_id: str) -> Optional[Dict[str, Any]]:
@@ -241,6 +292,7 @@ class EmailIndex:
         priority: Optional[str] = None,
         category: Optional[str] = None,
         sender_domain: Optional[str] = None,
+        sender_key: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get recent emails with optional filters.
@@ -249,7 +301,7 @@ class EmailIndex:
         query = """
             SELECT e.*, s.status AS sender_status, s.settings AS sender_settings
             FROM emails e
-            LEFT JOIN email_senders s ON e.sender_domain = s.sender_domain
+            LEFT JOIN email_senders s ON e.domain_key = s.domain_key
             WHERE 1=1
         """
         params: List[Any] = []
@@ -263,6 +315,9 @@ class EmailIndex:
         if sender_domain:
             query += " AND e.sender_domain = ?"
             params.append(sender_domain)
+        if sender_key:
+            query += " AND e.domain_key = ?"
+            params.append(sender_key)
 
         query += " ORDER BY e.received_at DESC, e.processed_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -351,7 +406,7 @@ class EmailIndex:
         query = """
             SELECT e.*, s.status AS sender_status, s.settings AS sender_settings
             FROM emails e
-            LEFT JOIN email_senders s ON e.sender_domain = s.sender_domain
+            LEFT JOIN email_senders s ON e.domain_key = s.domain_key
             WHERE e.subject LIKE ? OR e.sender LIKE ? OR e.snippet LIKE ?
         """
         params: List[Any] = [pattern, pattern, pattern]
@@ -405,6 +460,7 @@ class EmailIndex:
             cursor = conn.execute(query, params)
             rows = [dict(row) for row in cursor.fetchall()]
             for row in rows:
+                row["domain_key"] = row.get("domain_key") or row.get("sender_domain")
                 settings = row.get("settings")
                 if settings:
                     try:
@@ -446,7 +502,22 @@ class EmailIndex:
                 result["settings"] = {}
             return result
 
-    def backfill_senders_from_emails(self) -> Dict[str, Any]:
+    def get_sender_by_id(self, sender_id: int) -> Optional[Dict[str, Any]]:
+        """Get one sender row by id."""
+        with self.get_db() as conn:
+            cursor = conn.execute("SELECT * FROM email_senders WHERE id = ?", (sender_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            result["domain_key"] = result.get("domain_key") or result.get("sender_domain")
+            try:
+                result["settings"] = json.loads(result.get("settings") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                result["settings"] = {}
+            return result
+
+    def backfill_senders_from_emails(self, reset: bool = False) -> Dict[str, Any]:
         """
         Populate/refresh email_senders from existing emails rows.
         Does not overwrite sender status/settings for existing records.
@@ -455,24 +526,63 @@ class EmailIndex:
             before_count = conn.execute(
                 "SELECT COUNT(*) AS c FROM email_senders"
             ).fetchone()["c"]
+            if reset:
+                conn.execute("DELETE FROM email_senders")
 
-            cursor = conn.execute(
+            raw_rows = conn.execute(
                 """
-                SELECT
-                    sender_domain,
-                    COUNT(*) AS message_count,
-                    MIN(COALESCE(received_at, created_at, processed_at)) AS first_seen,
-                    MAX(COALESCE(received_at, created_at, processed_at)) AS last_seen
+                SELECT sender_domain, domain_key, sender,
+                       COALESCE(received_at, created_at, processed_at) AS seen_at
                 FROM emails
                 WHERE sender_domain IS NOT NULL AND TRIM(sender_domain) != ''
-                GROUP BY sender_domain
                 """
-            )
-            grouped = cursor.fetchall()
+            ).fetchall()
             now = datetime.utcnow().isoformat()
+            grouped: Dict[str, Dict[str, Any]] = {}
 
-            for row in grouped:
+            for row in raw_rows:
                 sender_domain = row["sender_domain"]
+                derived_key = self._extract_domain_key(sender_domain)
+                domain_key = row["domain_key"] or derived_key
+                if not domain_key:
+                    continue
+                seen_at = row["seen_at"] or now
+                sender = row["sender"] or ""
+
+                # Keep emails table aligned with corrected domain key.
+                conn.execute(
+                    """
+                    UPDATE emails
+                    SET domain_key = ?
+                    WHERE sender_domain = ?
+                      AND (domain_key IS NULL OR TRIM(domain_key) = '' OR domain_key != ?)
+                    """,
+                    (derived_key or domain_key, sender_domain, derived_key or domain_key),
+                )
+
+                current = grouped.get(domain_key)
+                if not current:
+                    grouped[domain_key] = {
+                        "sender_domain": sender_domain,
+                        "domain_key": domain_key,
+                        "latest_sender": sender,
+                        "message_count": 1,
+                        "first_seen": seen_at,
+                        "last_seen": seen_at,
+                    }
+                    continue
+
+                current["message_count"] += 1
+                current["latest_sender"] = sender or current["latest_sender"]
+                if seen_at < current["first_seen"]:
+                    current["first_seen"] = seen_at
+                if seen_at > current["last_seen"]:
+                    current["last_seen"] = seen_at
+
+            for row in grouped.values():
+                sender_domain = row["sender_domain"]
+                domain_key = row["domain_key"]
+                latest_sender = row["latest_sender"] or ""
                 tld = self._extract_tld(sender_domain)
                 message_count = int(row["message_count"] or 0)
                 first_seen = row["first_seen"] or now
@@ -481,16 +591,19 @@ class EmailIndex:
                 conn.execute(
                     """
                     INSERT INTO email_senders (
-                        sender_domain, tld, status, settings, message_count,
+                        sender_domain, domain_key, latest_sender, tld, status, settings, message_count,
                         first_seen, last_seen, updated_at
-                    ) VALUES (?, ?, 'new', '{}', ?, ?, ?, ?)
-                    ON CONFLICT(sender_domain) DO UPDATE SET
+                    ) VALUES (?, ?, ?, ?, 'new', '{}', ?, ?, ?, ?)
+                    ON CONFLICT(domain_key) DO UPDATE SET
+                        sender_domain = excluded.sender_domain,
+                        latest_sender = excluded.latest_sender,
+                        domain_key = excluded.domain_key,
                         tld = excluded.tld,
                         message_count = excluded.message_count,
                         last_seen = excluded.last_seen,
                         updated_at = excluded.updated_at
                     """,
-                    (sender_domain, tld, message_count, first_seen, last_seen, now),
+                    (sender_domain, domain_key, latest_sender, tld, message_count, first_seen, last_seen, now),
                 )
 
             after_count = conn.execute(
@@ -502,7 +615,24 @@ class EmailIndex:
             "rows_before": before_count,
             "rows_after": after_count,
             "new_rows_added": max(0, after_count - before_count),
+            "reset": reset,
         }
+
+    def get_recent_for_sender_domain_key(self, domain_key: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """Return a few recent emails for a sender domain key."""
+        with self.get_db() as conn:
+            cursor = conn.execute(
+                """
+                SELECT e.*, s.status AS sender_status, s.settings AS sender_settings
+                FROM emails e
+                LEFT JOIN email_senders s ON e.domain_key = s.domain_key
+                WHERE e.domain_key = ?
+                ORDER BY e.received_at DESC, e.processed_at DESC
+                LIMIT ?
+                """,
+                (domain_key, limit),
+            )
+            return [self._row_to_dict(row) for row in cursor.fetchall()]
 
 
 def main():

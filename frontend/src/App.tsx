@@ -6,6 +6,7 @@ import {
   getDashboardSummary,
   getGmailStatus,
   getRecentEmails,
+  getSenderRecentEmails,
   getSenders,
   revokeGmailOAuth,
   searchEmails,
@@ -35,6 +36,7 @@ function App() {
   const [groups, setGroups] = useState<UiEmailGroup[]>([]);
   const [gmailStatus, setGmailStatus] = useState<GmailStatus | null>(null);
   const [newSenders, setNewSenders] = useState<ApiSender[]>([]);
+  const [senderPreviews, setSenderPreviews] = useState<Record<number, string[]>>({});
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -58,6 +60,14 @@ function App() {
       setSummary(summaryData);
       setGmailStatus(statusData);
       setNewSenders(newSenderData);
+      const previewPairs = await Promise.all(
+        newSenderData.map(async (sender) => {
+          const emails = await getSenderRecentEmails(sender.id, 3);
+          const subjects = emails.map((email) => email.subject || "(No subject)");
+          return [sender.id, subjects] as const;
+        })
+      );
+      setSenderPreviews(Object.fromEntries(previewPairs));
       await loadDashboard();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load Mailtagger data.");
@@ -103,6 +113,14 @@ function App() {
       setActionMessage(`Sender marked as ${status}.`);
       const [newSenderData] = await Promise.all([getSenders("new", 15), loadDashboard(search)]);
       setNewSenders(newSenderData);
+      const previewPairs = await Promise.all(
+        newSenderData.map(async (sender) => {
+          const emails = await getSenderRecentEmails(sender.id, 3);
+          const subjects = emails.map((email) => email.subject || "(No subject)");
+          return [sender.id, subjects] as const;
+        })
+      );
+      setSenderPreviews(Object.fromEntries(previewPairs));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update sender status.");
     } finally {
@@ -241,11 +259,20 @@ function App() {
                       className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-card px-3 py-2"
                     >
                       <div>
-                        <p className="text-sm font-medium text-foreground">{sender.sender_domain}</p>
+                        <p className="text-sm font-medium text-foreground">
+                          {sender.latest_sender || sender.sender_domain}
+                        </p>
                         <p className="text-xs text-muted-foreground">
-                          tld: .{sender.tld} · {sender.message_count} message
+                          domain: {sender.domain_key || sender.sender_domain} · {sender.message_count} message
                           {sender.message_count === 1 ? "" : "s"}
                         </p>
+                        {(senderPreviews[sender.id] || []).length > 0 && (
+                          <ul className="mt-1 list-disc pl-4 text-xs text-muted-foreground">
+                            {(senderPreviews[sender.id] || []).map((subject, idx) => (
+                              <li key={`${sender.id}-${idx}`}>{subject}</li>
+                            ))}
+                          </ul>
+                        )}
                       </div>
                       <div className="flex items-center gap-2">
                         <button

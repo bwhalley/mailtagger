@@ -141,7 +141,8 @@ async def root():
             "GET /api/search": "Search emails",
             "GET /api/senders": "List sender-level status/preferences",
             "PUT /api/senders/{sender_id}": "Update sender status/preferences",
-            "POST /api/senders/backfill": "Backfill sender table from existing emails"
+            "POST /api/senders/backfill": "Backfill sender table from existing emails",
+            "GET /api/senders/{sender_id}/emails": "Recent emails for sender review"
         }
     }
 
@@ -389,6 +390,7 @@ async def get_emails(
     priority: Optional[str] = None,
     category: Optional[str] = None,
     sender_domain: Optional[str] = None,
+    sender_key: Optional[str] = None,
 ):
     """Get recent emails with optional filters."""
     if not EMAIL_INDEX_AVAILABLE:
@@ -403,6 +405,7 @@ async def get_emails(
             priority=priority,
             category=category,
             sender_domain=sender_domain,
+            sender_key=sender_key,
         )
         return {"success": True, "emails": emails, "count": len(emails)}
     except Exception as e:
@@ -508,7 +511,7 @@ async def update_sender(sender_id: int, request: SenderStatusUpdate):
 
 
 @app.post("/api/senders/backfill")
-async def backfill_senders():
+async def backfill_senders(reset: bool = False):
     """Backfill sender domains from existing emails into email_senders."""
     if not EMAIL_INDEX_AVAILABLE:
         raise HTTPException(
@@ -516,8 +519,29 @@ async def backfill_senders():
             detail="Email index not available"
         )
     try:
-        result = email_index.backfill_senders_from_emails()
+        result = email_index.backfill_senders_from_emails(reset=reset)
         return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/senders/{sender_id}/emails")
+async def get_sender_recent_emails(sender_id: int, limit: int = 3):
+    """Get a few recent emails for a sender record."""
+    if not EMAIL_INDEX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Email index not available"
+        )
+    try:
+        sender = email_index.get_sender_by_id(sender_id)
+        if not sender:
+            raise HTTPException(status_code=404, detail="sender not found")
+        domain_key = sender.get("domain_key") or sender.get("sender_domain")
+        emails = email_index.get_recent_for_sender_domain_key(domain_key=domain_key, limit=limit)
+        return {"success": True, "emails": emails, "count": len(emails), "domain_key": domain_key}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
