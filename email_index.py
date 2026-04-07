@@ -446,6 +446,64 @@ class EmailIndex:
                 result["settings"] = {}
             return result
 
+    def backfill_senders_from_emails(self) -> Dict[str, Any]:
+        """
+        Populate/refresh email_senders from existing emails rows.
+        Does not overwrite sender status/settings for existing records.
+        """
+        with self.get_db() as conn:
+            before_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM email_senders"
+            ).fetchone()["c"]
+
+            cursor = conn.execute(
+                """
+                SELECT
+                    sender_domain,
+                    COUNT(*) AS message_count,
+                    MIN(COALESCE(received_at, created_at, processed_at)) AS first_seen,
+                    MAX(COALESCE(received_at, created_at, processed_at)) AS last_seen
+                FROM emails
+                WHERE sender_domain IS NOT NULL AND TRIM(sender_domain) != ''
+                GROUP BY sender_domain
+                """
+            )
+            grouped = cursor.fetchall()
+            now = datetime.utcnow().isoformat()
+
+            for row in grouped:
+                sender_domain = row["sender_domain"]
+                tld = self._extract_tld(sender_domain)
+                message_count = int(row["message_count"] or 0)
+                first_seen = row["first_seen"] or now
+                last_seen = row["last_seen"] or now
+
+                conn.execute(
+                    """
+                    INSERT INTO email_senders (
+                        sender_domain, tld, status, settings, message_count,
+                        first_seen, last_seen, updated_at
+                    ) VALUES (?, ?, 'new', '{}', ?, ?, ?, ?)
+                    ON CONFLICT(sender_domain) DO UPDATE SET
+                        tld = excluded.tld,
+                        message_count = excluded.message_count,
+                        last_seen = excluded.last_seen,
+                        updated_at = excluded.updated_at
+                    """,
+                    (sender_domain, tld, message_count, first_seen, last_seen, now),
+                )
+
+            after_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM email_senders"
+            ).fetchone()["c"]
+
+        return {
+            "domains_scanned": len(grouped),
+            "rows_before": before_count,
+            "rows_after": after_count,
+            "new_rows_added": max(0, after_count - before_count),
+        }
+
 
 def main():
     """Quick test of EmailIndex."""

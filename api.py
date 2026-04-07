@@ -140,7 +140,8 @@ async def root():
             "GET /api/emails/grouped": "Emails grouped by sender",
             "GET /api/search": "Search emails",
             "GET /api/senders": "List sender-level status/preferences",
-            "PUT /api/senders/{sender_id}": "Update sender status/preferences"
+            "PUT /api/senders/{sender_id}": "Update sender status/preferences",
+            "POST /api/senders/backfill": "Backfill sender table from existing emails"
         }
     }
 
@@ -502,6 +503,21 @@ async def update_sender(sender_id: int, request: SenderStatusUpdate):
         return {"success": True, "sender": updated}
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/senders/backfill")
+async def backfill_senders():
+    """Backfill sender domains from existing emails into email_senders."""
+    if not EMAIL_INDEX_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Email index not available"
+        )
+    try:
+        result = email_index.backfill_senders_from_emails()
+        return {"success": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
