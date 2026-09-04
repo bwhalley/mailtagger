@@ -9,14 +9,15 @@ from typing import Literal
 
 
 class EmailClassification(dspy.Signature):
-    """Classify an email into ecommerce, political, or none categories.
+    """Classify an email into transactional and marketing categories.
     
-    This signature defines the structure for email classification:
-    - Input: sender email, subject line, and body text
-    - Output: category (ecommerce/political/none), reasoning, and confidence score
-    
-    The signature is used by DSPy modules to automatically generate appropriate
-    prompts for different language models.
+    Categories:
+    - receipt: payment/invoice/receipt (not marketing)
+    - order: order placed/confirmed, not yet shipped
+    - shipping: shipped, in transit, out for delivery, delivered
+    - ecommerce: marketing/promos from stores
+    - political: campaigns/donations
+    - none: everything else
     """
     
     sender = dspy.InputField(
@@ -29,9 +30,10 @@ class EmailClassification(dspy.Signature):
         desc="Email body text (truncated to key content)"
     )
     
-    category: Literal['ecommerce', 'political', 'none'] = dspy.OutputField(
-        desc="Classification category: 'ecommerce' for marketing/retail emails, "
-             "'political' for campaign/donation emails, 'none' for everything else"
+    category: Literal[
+        'receipt', 'order', 'shipping', 'ecommerce', 'political', 'none'
+    ] = dspy.OutputField(
+        desc="Classification category: receipt, order, shipping, ecommerce, political, or none"
     )
     reason: str = dspy.OutputField(
         desc="Brief explanation for the classification decision"
@@ -63,10 +65,14 @@ class EmailClassificationDetailed(dspy.Signature):
     )
     
     # Classification fields
-    category: Literal['ecommerce', 'political', 'none'] = dspy.OutputField(
+    category: Literal[
+        'receipt', 'order', 'shipping', 'ecommerce', 'political', 'none'
+    ] = dspy.OutputField(
         desc="Primary classification category"
     )
-    alternative_category: Literal['ecommerce', 'political', 'none', 'uncertain'] = dspy.OutputField(
+    alternative_category: Literal[
+        'receipt', 'order', 'shipping', 'ecommerce', 'political', 'none', 'uncertain'
+    ] = dspy.OutputField(
         desc="Alternative category if confidence is low"
     )
     reason: str = dspy.OutputField(
@@ -163,3 +169,27 @@ class EmailSummary(dspy.Signature):
     summary: str = dspy.OutputField(
         desc="One-sentence summary of the email content and any action needed"
     )
+
+
+class OrderExtraction(dspy.Signature):
+    """Extract structured order and shipment data from a transactional email."""
+
+    sender = dspy.InputField(desc="Email sender address")
+    subject = dspy.InputField(desc="Email subject line")
+    body = dspy.InputField(desc="Email body text")
+
+    merchant: str = dspy.OutputField(desc="Retailer or shipper name")
+    order_number: str = dspy.OutputField(desc="Order number, empty if unknown")
+    tracking_number: str = dspy.OutputField(desc="Tracking number, empty if unknown")
+    carrier: str = dspy.OutputField(desc="Carrier name: FedEx, UPS, USPS, DHL, etc.")
+    status: Literal[
+        "ordered", "confirmed", "shipped", "in_transit",
+        "out_for_delivery", "delivered", "unknown"
+    ] = dspy.OutputField(desc="Shipment status")
+    amount: str = dspy.OutputField(desc="Order total amount, empty if unknown")
+    currency: str = dspy.OutputField(desc="Currency code e.g. USD, empty if unknown")
+    estimated_delivery: str = dspy.OutputField(
+        desc="Estimated delivery date, ISO or human-readable, empty if unknown"
+    )
+    tracking_url: str = dspy.OutputField(desc="Tracking URL, empty if unknown")
+    item_summary: str = dspy.OutputField(desc="Short summary of items ordered")

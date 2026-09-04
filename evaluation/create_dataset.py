@@ -216,6 +216,50 @@ def create_synthetic_examples() -> List[Example]:
             category="ecommerce",
             source="synthetic"
         ),
+
+        # Receipt / order / shipping examples
+        Example(
+            sender="auto-confirm@amazon.com",
+            subject="Your Amazon.com order #112-1234567-8901234",
+            body="Thank you for your order. Order total: $49.99. We'll send a confirmation when your item ships.",
+            category="order",
+            source="synthetic"
+        ),
+        Example(
+            sender="shipment-tracking@amazon.com",
+            subject="Your package has shipped!",
+            body="Your package is on the way. Tracking ID: 1Z999AA10123456784. Track your package at amazon.com/progress-tracker.",
+            category="shipping",
+            source="synthetic"
+        ),
+        Example(
+            sender="tracking@fedex.com",
+            subject="FedEx Shipment 123456789012: Out for delivery",
+            body="Your package is out for delivery today. Tracking number: 123456789012.",
+            category="shipping",
+            source="synthetic"
+        ),
+        Example(
+            sender="noreply@ups.com",
+            subject="UPS Update: Package Delivered",
+            body="Your package with tracking number 1Z999AA10123456784 was delivered today.",
+            category="shipping",
+            source="synthetic"
+        ),
+        Example(
+            sender="receipts@target.com",
+            subject="Your Target receipt",
+            body="Thank you for shopping at Target. Order #123456789. Total: $32.15.",
+            category="receipt",
+            source="synthetic"
+        ),
+        Example(
+            sender="newsletter@sephora.com",
+            subject="New arrivals: Shop beauty bestsellers",
+            body="Discover this week's new beauty launches. Shop now and earn points on every purchase.",
+            category="ecommerce",
+            source="synthetic"
+        ),
         
         # Political examples
         Example(

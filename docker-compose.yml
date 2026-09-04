@@ -23,6 +23,10 @@ services:
       - LABEL_ECOMMERCE=AI_Ecommerce
       - LABEL_POLITICAL=AI_Political
       - LABEL_TRIAGED=AI_Triaged
+      - LABEL_RECEIPT=AI_Receipt
+      - LABEL_ORDER=AI_Order
+      - LABEL_SHIPPING=AI_Shipping
+      - LABEL_CARRIERS=Carriers
       
       # Gmail Query
       - GMAIL_QUERY=in:inbox newer_than:14d -label:AI_Triaged
@@ -37,6 +41,7 @@ services:
       
       # Email Dashboard
       - EMAIL_INDEX_PATH=/app/data/emails.db
+      - ORDER_INDEX_PATH=/app/data/emails.db
       - PROMPT_DB_PATH=/app/data/prompts.db
       
       # Logging
@@ -73,6 +78,7 @@ services:
     environment:
       - PROMPT_DB_PATH=/app/data/prompts.db
       - EMAIL_INDEX_PATH=/app/data/emails.db
+      - ORDER_INDEX_PATH=/app/data/emails.db
       - GMAIL_CREDENTIALS_PATH=/app/data
       - HOST=0.0.0.0
       - PORT=8000

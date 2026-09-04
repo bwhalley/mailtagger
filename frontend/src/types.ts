@@ -71,3 +71,44 @@ export interface ApiSender {
   first_seen?: string;
   last_seen?: string;
 }
+
+export type ShipmentStatus =
+  | "ordered"
+  | "confirmed"
+  | "shipped"
+  | "in_transit"
+  | "out_for_delivery"
+  | "delivered"
+  | "unknown";
+
+export interface ApiShipmentEmail {
+  gmail_id?: string;
+  subject?: string;
+  received_at?: string;
+}
+
+export interface ApiShipment {
+  id: number;
+  merchant: string;
+  carrier?: string | null;
+  tracking_number?: string | null;
+  tracking_url?: string | null;
+  order_number?: string | null;
+  status: ShipmentStatus;
+  estimated_delivery?: string | null;
+  item_summary?: string | null;
+  amount?: string | null;
+  currency?: string | null;
+  last_email_at?: string | null;
+  thread_id?: string | null;
+  linked_emails?: ApiShipmentEmail[];
+}
+
+export interface OrdersSummary {
+  by_status: Record<string, number>;
+  in_transit: number;
+  out_for_delivery: number;
+  arriving_this_week: number;
+  delivered_recent: number;
+  total: number;
+}

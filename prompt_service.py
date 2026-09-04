@@ -102,6 +102,9 @@ class PromptService:
             if cursor.fetchone()["count"] == 0:
                 defaults = [
                     ("receipts", "high", True),
+                    ("receipt", "high", True),
+                    ("order", "high", True),
+                    ("shipping", "high", True),
                     ("transactions", "high", True),
                     ("personal", "high", True),
                     ("critical", "high", True),
@@ -114,6 +117,19 @@ class PromptService:
                 conn.executemany(
                     "INSERT INTO priority_config (category, default_priority, is_high_value) VALUES (?, ?, ?)",
                     defaults,
+                )
+
+            # Ensure newer transactional categories exist in existing DBs
+            for cat, pri, high_val in [
+                ("receipt", "high", True),
+                ("order", "high", True),
+                ("shipping", "high", True),
+            ]:
+                conn.execute(
+                    """INSERT INTO priority_config (category, default_priority, is_high_value)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(category) DO NOTHING""",
+                    (cat, pri, high_val),
                 )
 
             # Create default prompt if none exists

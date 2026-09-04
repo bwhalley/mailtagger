@@ -14,7 +14,7 @@ const priorityToLane = (
   if (senderStatus === "highlight") return "urgent";
   if (priority === "high") return "urgent";
   if (priority === "low") return "auto";
-  if (classification && ["ecommerce", "promo", "social", "receipt"].includes(classification)) {
+  if (classification && ["ecommerce", "promo", "social", "receipt", "order", "shipping"].includes(classification)) {
     return "auto";
   }
   return "ready";

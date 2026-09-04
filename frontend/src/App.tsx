@@ -1,12 +1,14 @@
-import { Inbox, Search } from "lucide-react";
+import { Inbox, Package, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { GmailAuthCard } from "./components/GmailAuthCard";
 import { LaneSection } from "./components/LaneSection";
+import { PackagesPage } from "./components/PackagesPage";
 import { SenderSettingsPage } from "./components/settings/SenderSettingsPage";
 import { SettingsOverviewPage } from "./components/settings/SettingsOverviewPage";
 import {
   getDashboardSummary,
   getGmailStatus,
+  getOrdersSummary,
   getRecentEmails,
   getSenderRecentEmails,
   getSenders,
@@ -16,7 +18,7 @@ import {
   updateSenderStatus
 } from "./api";
 import { groupEmailsForInbox } from "./adapters";
-import type { ApiSender, DashboardSummary, GmailStatus, SenderStatus, UiEmailGroup } from "./types";
+import type { ApiSender, DashboardSummary, GmailStatus, OrdersSummary, SenderStatus, UiEmailGroup } from "./types";
 
 const laneMeta = {
   urgent: {
@@ -36,6 +38,7 @@ const laneMeta = {
 function App() {
   const [path, setPath] = useState<string>(() => window.location.pathname || "/");
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [ordersSummary, setOrdersSummary] = useState<OrdersSummary | null>(null);
   const [groups, setGroups] = useState<UiEmailGroup[]>([]);
   const [gmailStatus, setGmailStatus] = useState<GmailStatus | null>(null);
   const [newSenders, setNewSenders] = useState<ApiSender[]>([]);
@@ -61,12 +64,14 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      const [summaryData, statusData, newSenderData] = await Promise.all([
+      const [summaryData, statusData, newSenderData, ordersSummaryData] = await Promise.all([
         getDashboardSummary(),
         getGmailStatus(),
-        getSenders("new", 15)
+        getSenders("new", 15),
+        getOrdersSummary().catch(() => null)
       ]);
       setSummary(summaryData);
+      setOrdersSummary(ordersSummaryData);
       setGmailStatus(statusData);
       setNewSenders(newSenderData);
       const previewPairs = await Promise.all(
@@ -92,7 +97,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (path.startsWith("/settings")) {
+    if (path.startsWith("/settings") || path.startsWith("/packages")) {
       return;
     }
     refresh();
@@ -184,6 +189,10 @@ function App() {
     }
   };
 
+  if (path.startsWith("/packages")) {
+    return <PackagesPage onNavigate={navigateTo} />;
+  }
+
   if (path.startsWith("/settings/senders")) {
     return <SenderSettingsPage onNavigate={navigateTo} />;
   }
@@ -203,6 +212,13 @@ function App() {
               className="rounded-md bg-muted px-2.5 py-1.5 text-xs font-medium text-muted-foreground"
             >
               Settings
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateTo("/packages")}
+              className="rounded-md bg-muted px-2.5 py-1.5 text-xs font-medium text-muted-foreground"
+            >
+              Packages
             </button>
             <Inbox className="h-5 w-5 text-primary" />
             <h1 className="font-display text-lg font-semibold">Mailtagger Inbox</h1>
@@ -356,6 +372,35 @@ function App() {
               onAuthorize={handleAuthorize}
               onRevoke={handleRevoke}
             />
+
+            {ordersSummary && (ordersSummary.in_transit > 0 || ordersSummary.out_for_delivery > 0) && (
+              <section className="rounded-xl border border-border bg-card p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Package className="h-4 w-4 text-primary" />
+                    <h2 className="font-display text-base font-semibold">Packages</h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => navigateTo("/packages")}
+                    className="rounded-md bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground"
+                  >
+                    View
+                  </button>
+                </div>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {ordersSummary.out_for_delivery > 0 && (
+                    <span>{ordersSummary.out_for_delivery} out for delivery</span>
+                  )}
+                  {ordersSummary.out_for_delivery > 0 && ordersSummary.in_transit > 0 && (
+                    <span> · </span>
+                  )}
+                  {ordersSummary.in_transit > 0 && (
+                    <span>{ordersSummary.in_transit} in transit</span>
+                  )}
+                </p>
+              </section>
+            )}
 
             <section className="rounded-xl border border-border bg-card p-4 shadow-sm">
               <h2 className="font-display text-base font-semibold">Top Classifications</h2>

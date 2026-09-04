@@ -1,4 +1,12 @@
-import type { ApiEmail, ApiSender, DashboardSummary, GmailStatus, SenderStatus } from "./types";
+import type {
+  ApiEmail,
+  ApiSender,
+  ApiShipment,
+  DashboardSummary,
+  GmailStatus,
+  OrdersSummary,
+  SenderStatus
+} from "./types";
 
 interface ApiEnvelope<T> {
   success: boolean;
@@ -116,4 +124,47 @@ export async function getSenderRecentEmails(senderId: number, limit = 3): Promis
     return [];
   }
   return response.emails;
+}
+
+export async function getOrdersSummary(): Promise<OrdersSummary> {
+  const response = await requestJson<{ success: boolean; summary: OrdersSummary }>(
+    "/api/orders/summary"
+  );
+  if (!response.success || !response.summary) {
+    throw new Error("Orders summary unavailable");
+  }
+  return response.summary;
+}
+
+export async function getActiveShipments(limit = 50): Promise<ApiShipment[]> {
+  const response = await requestJson<{ success: boolean; shipments: ApiShipment[] }>(
+    `/api/orders?active=true&limit=${limit}`
+  );
+  if (!response.success || !response.shipments) {
+    return [];
+  }
+  return response.shipments;
+}
+
+export async function getShipmentsByStatus(
+  status: string,
+  limit = 50
+): Promise<ApiShipment[]> {
+  const response = await requestJson<{ success: boolean; shipments: ApiShipment[] }>(
+    `/api/orders?status=${encodeURIComponent(status)}&limit=${limit}`
+  );
+  if (!response.success || !response.shipments) {
+    return [];
+  }
+  return response.shipments;
+}
+
+export async function getRecentOrders(limit = 20): Promise<ApiShipment[]> {
+  const response = await requestJson<{ success: boolean; shipments: ApiShipment[] }>(
+    `/api/orders?recent_orders=true&limit=${limit}`
+  );
+  if (!response.success || !response.shipments) {
+    return [];
+  }
+  return response.shipments;
 }

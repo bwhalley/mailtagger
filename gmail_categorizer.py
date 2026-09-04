@@ -4,20 +4,50 @@ from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 from pathlib import Path
 
-# Gmail API
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+# Gmail API imports are lazy-loaded so --backfill-orders works without google-* packages.
+build = None
+HttpError = None
+Request = None
+Credentials = None
+InstalledAppFlow = None
 
-# HTTP
-import requests
-from requests.adapters import HTTPAdapter
-try:
-    from urllib3.util.retry import Retry
-except ImportError:
-    from requests.packages.urllib3.util.retry import Retry
+
+def _ensure_gmail_imports():
+    """Load Gmail API dependencies on first use."""
+    global build, HttpError, Request, Credentials, InstalledAppFlow
+    if build is not None:
+        return
+    from googleapiclient.discovery import build as _build
+    from googleapiclient.errors import HttpError as _HttpError
+    from google.auth.transport.requests import Request as _Request
+    from google.oauth2.credentials import Credentials as _Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow as _InstalledAppFlow
+
+    build = _build
+    HttpError = _HttpError
+    Request = _Request
+    Credentials = _Credentials
+    InstalledAppFlow = _InstalledAppFlow
+
+# HTTP (lazy-loaded for LLM calls; not needed for --backfill-orders --no-llm)
+requests = None
+HTTPAdapter = None
+Retry = None
+
+
+def _ensure_http_imports():
+    global requests, HTTPAdapter, Retry
+    if requests is not None:
+        return
+    import requests as _requests
+    from requests.adapters import HTTPAdapter as _HTTPAdapter
+    try:
+        from urllib3.util.retry import Retry as _Retry
+    except ImportError:
+        from requests.packages.urllib3.util.retry import Retry as _Retry
+    requests = _requests
+    HTTPAdapter = _HTTPAdapter
+    Retry = _Retry
 
 # Optional .env support
 try:
@@ -40,11 +70,18 @@ except ImportError:
 try:
     from email_index import EmailIndex
     from prompt_service import PromptService
+    from order_index import OrderIndex
+    from carrier_rules import match_carrier
+    from order_extraction import should_extract, extract_order_data
     EMAIL_INDEX_AVAILABLE = True
 except ImportError:
     EMAIL_INDEX_AVAILABLE = False
     EmailIndex = None
     PromptService = None
+    OrderIndex = None
+    match_carrier = None
+    should_extract = None
+    extract_order_data = None
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
@@ -65,6 +102,22 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
 LABEL_ECOMMERCE = os.getenv("LABEL_ECOMMERCE", "AI_Ecommerce")
 LABEL_POLITICAL = os.getenv("LABEL_POLITICAL", "AI_Political")
 LABEL_TRIAGED   = os.getenv("LABEL_TRIAGED",   "AI_Triaged")
+LABEL_RECEIPT   = os.getenv("LABEL_RECEIPT",   "AI_Receipt")
+LABEL_ORDER     = os.getenv("LABEL_ORDER",     "AI_Order")
+LABEL_SHIPPING  = os.getenv("LABEL_SHIPPING",  "AI_Shipping")
+LABEL_CARRIERS  = os.getenv("LABEL_CARRIERS",  "Carriers")
+
+VALID_CATEGORIES = {
+    "receipt", "order", "shipping", "ecommerce", "political", "none", "blocklist"
+}
+
+CATEGORY_LABEL_MAP = {
+    "ecommerce": LABEL_ECOMMERCE,
+    "political": LABEL_POLITICAL,
+    "receipt": LABEL_RECEIPT,
+    "order": LABEL_ORDER,
+    "shipping": LABEL_SHIPPING,
+}
 
 # Processing settings
 DEFAULT_QUERY   = os.getenv("GMAIL_QUERY", "in:inbox newer_than:14d -label:%s" % LABEL_TRIAGED)
@@ -87,6 +140,7 @@ USE_DSPY = os.getenv("USE_DSPY", "false").lower() in ("true", "1", "yes")
 # Email index (dashboard persistence)
 EMAIL_INDEX_PATH = os.getenv("EMAIL_INDEX_PATH", "./data/emails.db")
 PROMPT_DB_PATH = os.getenv("PROMPT_DB_PATH", "./data/prompts.db")
+ORDER_INDEX_PATH = os.getenv("ORDER_INDEX_PATH", EMAIL_INDEX_PATH)
 
 # Tier 2: max chars for snippet-only classification (saves tokens)
 TIER2_SNIPPET_MAX = int(os.getenv("TIER2_SNIPPET_MAX", "2000"))
@@ -150,6 +204,7 @@ def check_ollama_health() -> bool:
         return True
     
     try:
+        _ensure_http_imports()
         # Extract base URL from OLLAMA_URL
         base_url = OLLAMA_URL.replace('/v1/chat/completions', '')
         health_url = f"{base_url}/api/tags"
@@ -222,8 +277,9 @@ def perform_startup_health_checks() -> bool:
     return all_checks_passed
 
 # ------- Retry Logic -------
-def create_retry_session(retries: int = MAX_RETRIES, backoff: float = RETRY_BACKOFF) -> requests.Session:
+def create_retry_session(retries: int = MAX_RETRIES, backoff: float = RETRY_BACKOFF):
     """Create a requests session with retry logic."""
+    _ensure_http_imports()
     session = requests.Session()
     retry_strategy = Retry(
         total=retries,
@@ -245,6 +301,7 @@ def gmail_service(skip_auth_flow: bool = False) -> Any:
         skip_auth_flow: If True, don't attempt OAuth flow. Just raise exception if no valid token.
                        Useful for daemon mode where web-based auth should be used.
     """
+    _ensure_gmail_imports()
     creds = None
     token_path = Path(CREDENTIALS_PATH) / 'token.json'
     creds_path = Path(CREDENTIALS_PATH) / 'credentials.json'
@@ -430,16 +487,19 @@ def safe_snippet(text: str, max_chars: int = 6000) -> str:
     return t[:max_chars]
 
 PROMPT_RULES = (
-    "You are a strict email classifier. Classify an email into exactly ONE of two buckets:\n"
-    "1) 'ecommerce' – marketing or campaign emails from stores/brands about sales, product launches, coupons, promotions, newsletters from retailers.\n"
-    "   Include brand newsletters, 'shop now', seasonal sales, product announcements, abandoned cart promos, discount codes.\n"
-    "   Exclude order receipts or shipping notifications if purely transactional.\n"
-    "2) 'political' – messages from campaigns, candidates, PACs, NGOs/activist orgs soliciting donations, petitions, or political actions. "
-    "   Look for cues like ActBlue/WinRed links, 'chip in', 'end-of-quarter', 'paid for by', election/candidate names.\n"
-    "If neither fits, choose 'ecommerce' ONLY if it's clearly a store/brand campaign; otherwise return 'none'.\n"
-    "IMPORTANT: Respond with ONLY valid JSON. No additional text, no explanations outside the JSON.\n"
-    "Format: {\"category\": \"ecommerce|political|none\", \"reason\": \"short explanation\", \"confidence\": 0.9}\n"
-    "Be conservative and only pick 'political' if clearly political."
+    "You are a strict email classifier. Classify an email into exactly ONE category:\n"
+    "1) 'receipt' – payment confirmation, invoice, donation receipt, transaction record. NOT marketing.\n"
+    "2) 'order' – order placed or confirmed, thank-you-for-your-order, pre-shipment status.\n"
+    "3) 'shipping' – shipped, tracking update, in transit, out for delivery, delivered, package status.\n"
+    "4) 'ecommerce' – marketing or campaign emails from stores/brands: sales, coupons, newsletters, "
+    "product launches, abandoned cart promos. Exclude order receipts and shipping notifications.\n"
+    "5) 'political' – campaigns, candidates, PACs, NGOs soliciting donations, petitions, political actions. "
+    "Look for ActBlue/WinRed links, 'chip in', 'paid for by', election/candidate names.\n"
+    "6) 'none' – everything else that does not fit the above.\n"
+    "IMPORTANT: Respond with ONLY valid JSON. No additional text.\n"
+    "Format: {\"category\": \"receipt|order|shipping|ecommerce|political|none\", "
+    "\"reason\": \"short explanation\", \"confidence\": 0.9}\n"
+    "Be conservative with political. Marketing store emails are ecommerce, not receipt/order/shipping."
 )
 
 def log_performance_metrics(provider: str, elapsed_time: float, total_tokens: int = 0, 
@@ -881,13 +941,20 @@ def call_llm_classifier(subject: str, body: str, sender: str, verbose: bool = Fa
         if not DSPY_AVAILABLE:
             logger.warning("USE_DSPY=true but DSPy not available, falling back to legacy")
         else:
-            return call_llm_classifier_dspy(subject, body, sender, verbose)
+            result = call_llm_classifier_dspy(subject, body, sender, verbose)
+            if isinstance(result, dict):
+                result["category"] = _normalize_category(result.get("category", "none"))
+            return result
     
     # Legacy implementation
     provider = LLM_PROVIDER
     if provider == "ollama":
-        return call_ollama_classifier(subject, body, sender, verbose)
-    return call_openai_classifier(subject, body, sender, verbose)
+        result = call_ollama_classifier(subject, body, sender, verbose)
+    else:
+        result = call_openai_classifier(subject, body, sender, verbose)
+    if isinstance(result, dict):
+        result["category"] = _normalize_category(result.get("category", "none"))
+    return result
 
 def ensure_labels_map(svc, want_names):
     existing = svc.users().labels().list(userId='me').execute().get('labels', [])
@@ -930,6 +997,14 @@ def _check_transactional_keywords(subject: str, snippet: str) -> bool:
     return any(kw in content for kw in TRANSACTIONAL_KEYWORDS)
 
 
+def _normalize_category(category: str) -> str:
+    """Normalize classifier output to a known category."""
+    cat = (category or "none").lower().strip()
+    if cat in VALID_CATEGORIES:
+        return cat
+    return "none"
+
+
 def _persist_to_index(
     gmail_id: str,
     thread_id: str,
@@ -950,6 +1025,8 @@ def _persist_to_index(
     # Priority: Tier 1 rules override category-based
     if category == "blocklist":
         priority = "low"
+    elif category in ("receipt", "order", "shipping"):
+        priority = "high"
     else:
         sender_result = prompt_svc.get_priority_for_sender(sender)
         if sender_result:
@@ -987,6 +1064,60 @@ def _persist_to_index(
     )
 
 
+def _persist_shipment(
+    email_row_id: int,
+    gmail_id: str,
+    thread_id: str,
+    sender: str,
+    subject: str,
+    body_text: str,
+    snippet: str,
+    received_at_iso: Optional[str],
+    category: str,
+    carrier_match,
+) -> None:
+    """Extract and persist shipment data when applicable."""
+    if not EMAIL_INDEX_AVAILABLE or OrderIndex is None:
+        return
+    if not should_extract(
+        carrier_match is not None,
+        category,
+        subject,
+        snippet,
+    ):
+        return
+
+    carrier_hint = carrier_match.carrier_name if carrier_match else ""
+    extracted = extract_order_data(
+        sender,
+        subject,
+        body_text or snippet,
+        carrier_hint=carrier_hint,
+        category=category,
+        use_dspy=USE_DSPY,
+        use_llm=True,
+    )
+
+    order_index = OrderIndex(ORDER_INDEX_PATH)
+    order_index.upsert_shipment(
+        email_id=email_row_id,
+        gmail_id=gmail_id,
+        thread_id=thread_id,
+        merchant=extracted.get("merchant", ""),
+        order_number=extracted.get("order_number", ""),
+        tracking_number=extracted.get("tracking_number", ""),
+        carrier=extracted.get("carrier", "") or carrier_hint,
+        status=extracted.get("status", "unknown"),
+        amount=extracted.get("amount", ""),
+        currency=extracted.get("currency", ""),
+        estimated_delivery=extracted.get("estimated_delivery", ""),
+        tracking_url=extracted.get("tracking_url", ""),
+        item_summary=extracted.get("item_summary", ""),
+        received_at=received_at_iso,
+        subject=subject,
+    )
+
+
 def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbose=False, daemon_mode=False) -> int:
     """
     Run one iteration of email processing. Returns number of processed emails.
@@ -994,6 +1125,7 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
     Args:
         daemon_mode: If True, skip interactive OAuth and just report auth needed.
     """
+    _ensure_gmail_imports()
     global shutdown_requested
     
     logger.info(f"Starting email processing run (dry_run={dry_run}, max_results={max_results})")
@@ -1018,7 +1150,10 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
             logger.info("Waiting for Gmail authorization via web interface...")
         return 0
     
-    want_labels = [LABEL_ECOMMERCE, LABEL_POLITICAL, LABEL_TRIAGED]
+    want_labels = [
+        LABEL_ECOMMERCE, LABEL_POLITICAL, LABEL_TRIAGED,
+        LABEL_RECEIPT, LABEL_ORDER, LABEL_SHIPPING, LABEL_CARRIERS,
+    ]
     try:
         labels_map = ensure_labels_map(svc, want_labels)
         logger.debug(f"Labels ensured: {list(labels_map.keys())}")
@@ -1062,20 +1197,37 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
             subject, sender = get_subject_and_from(headers)
             text = extract_text_from_payload(payload) or ""
             snippet = safe_snippet(text, TIER2_SNIPPET_MAX)
+            body_snippet = safe_snippet(text, 500)
             
             if verbose:
                 logger.debug(f"Extracted text length: {len(text)} chars, snippet: {len(snippet)} chars")
 
+            carrier_match = match_carrier(sender, subject, snippet) if match_carrier else None
+
             # Tier 1: Check if we can skip LLM (blocklist)
             tier1_result = _apply_tier1_rules(sender, subject, snippet)
+            category = "none"
+            confidence = 0.0
+            reason = ""
+
             if tier1_result:
                 priority, category, reason = tier1_result
                 result = {"category": category, "reason": reason, "confidence": 0.9}
                 logger.info(f"[Tier1 skip] {priority}: {subject[:60]}... ({reason})")
+                confidence = 0.9
+            elif carrier_match:
+                category = "shipping"
+                confidence = 0.95
+                reason = f"Carrier sender: {carrier_match.carrier_name}"
+                result = {"category": category, "reason": reason, "confidence": confidence}
+                logger.info(f"[Tier1b carrier] {carrier_match.carrier_name}: {subject[:60]}...")
             else:
                 # Tier 2: Lightweight LLM (subject + snippet)
                 logger.debug(f"Classifying: '{subject[:60]}...' from {sender}")
                 result = call_llm_classifier(subject, snippet, sender, verbose)
+                category = _normalize_category(result.get("category") or "none")
+                confidence = float(result.get("confidence", 0))
+                reason = result.get("reason", "")
             
             # Collect performance metrics if available (stored in result metadata)
             if verbose and isinstance(result, dict) and '_metrics' in result:
@@ -1086,10 +1238,18 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
                 performance_stats['total_prompt_tokens'] += metrics.get('prompt_tokens', 0)
                 performance_stats['total_completion_tokens'] += metrics.get('completion_tokens', 0)
                 performance_stats['latencies'].append(metrics.get('latency', 0))
-            category = (result.get("category") or "none").lower()
-            confidence = float(result.get("confidence", 0))
-            reason = result.get("reason", "")
 
+            # Convert Gmail internalDate (ms since epoch) to ISO
+            iso_date = None
+            internal_date = first.get("internalDate")
+            if internal_date:
+                try:
+                    ts_ms = int(internal_date)
+                    iso_date = datetime.utcfromtimestamp(ts_ms / 1000.0).isoformat() + "Z"
+                except (ValueError, TypeError):
+                    iso_date = str(internal_date)
+
+            email_row_id = None
             # Persist to email index for dashboard
             if EMAIL_INDEX_AVAILABLE:
                 try:
@@ -1098,25 +1258,46 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
                         thread_id=tid,
                         sender=sender,
                         subject=subject,
-                        snippet=safe_snippet(text, 500),
+                        snippet=body_snippet,
                         body_text=text[:2000] if text else "",
-                        received_at=first.get("internalDate"),
+                        received_at=internal_date,
                         label_ids=first.get("labelIds", []),
                         category=category,
                         confidence=confidence,
                         reason=reason,
                     )
+                    index = EmailIndex(EMAIL_INDEX_PATH)
+                    row = index.get_by_gmail_id(first["id"])
+                    email_row_id = row["id"] if row else None
                 except Exception as e:
                     logger.warning(f"Failed to persist to email index: {e}")
 
+            if email_row_id:
+                try:
+                    _persist_shipment(
+                        email_row_id=email_row_id,
+                        gmail_id=first["id"],
+                        thread_id=tid,
+                        sender=sender,
+                        subject=subject,
+                        body_text=text[:2000] if text else "",
+                        snippet=body_snippet,
+                        received_at_iso=iso_date,
+                        category=category,
+                        carrier_match=carrier_match,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist shipment: {e}")
+
             add_ids = [labels_map[LABEL_TRIAGED]]
-            if category == "political":
-                add_ids.append(labels_map[LABEL_POLITICAL])
-            elif category == "ecommerce":
-                add_ids.append(labels_map[LABEL_ECOMMERCE])
+            label_name = CATEGORY_LABEL_MAP.get(category)
+            if label_name and label_name in labels_map:
+                add_ids.append(labels_map[label_name])
+            if carrier_match and LABEL_CARRIERS in labels_map:
+                add_ids.append(labels_map[LABEL_CARRIERS])
 
             log_msg = f"[{category:10}] conf={confidence:.2f}  {subject[:90]}  (reason: {reason})"
-            if category in ["political", "ecommerce"]:
+            if category in ["political", "ecommerce", "receipt", "order", "shipping"]:
                 logger.info(log_msg)
             else:
                 logger.debug(log_msg)
@@ -1173,6 +1354,79 @@ def run_once(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, verbos
         logger.info("=" * 60)
     
     return processed
+
+
+def backfill_orders(limit: int = 500, use_llm: bool = True) -> int:
+    """Re-run order extraction on indexed transactional emails."""
+    if not EMAIL_INDEX_AVAILABLE or OrderIndex is None:
+        logger.error("Email index not available for backfill")
+        return 0
+
+    from carrier_rules import is_carrier_domain, match_carrier
+
+    index = EmailIndex(EMAIL_INDEX_PATH)
+    order_index = OrderIndex(ORDER_INDEX_PATH)
+    processed = 0
+
+    with index.get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM emails
+            WHERE classification IN ('receipt', 'order', 'shipping')
+               OR sender_domain IS NOT NULL
+            ORDER BY received_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    for row in rows:
+        email = dict(row)
+        sender = email.get("sender") or ""
+        subject = email.get("subject") or ""
+        body = email.get("body_text") or email.get("snippet") or ""
+        sender_domain = email.get("sender_domain") or ""
+        classification = email.get("classification") or "none"
+
+        carrier_match = match_carrier(sender, subject, body) if match_carrier else None
+        is_carrier = is_carrier_domain(sender_domain) if sender_domain else False
+
+        if classification not in ("receipt", "order", "shipping") and not is_carrier and not carrier_match:
+            if not should_extract(False, classification, subject, body):
+                continue
+
+        extracted = extract_order_data(
+            sender,
+            subject,
+            body,
+            carrier_hint=carrier_match.carrier_name if carrier_match else "",
+            category=classification,
+            use_dspy=USE_DSPY,
+            use_llm=use_llm,
+        )
+
+        order_index.upsert_shipment(
+            email_id=email.get("id"),
+            gmail_id=email.get("gmail_id"),
+            thread_id=email.get("thread_id"),
+            merchant=extracted.get("merchant", ""),
+            order_number=extracted.get("order_number", ""),
+            tracking_number=extracted.get("tracking_number", ""),
+            carrier=extracted.get("carrier", ""),
+            status=extracted.get("status", "unknown"),
+            amount=extracted.get("amount", ""),
+            currency=extracted.get("currency", ""),
+            estimated_delivery=extracted.get("estimated_delivery", ""),
+            tracking_url=extracted.get("tracking_url", ""),
+            item_summary=extracted.get("item_summary", ""),
+            received_at=email.get("received_at"),
+            subject=subject,
+        )
+        processed += 1
+
+    logger.info(f"Order backfill complete. Processed: {processed}")
+    return processed
+
 
 def run_daemon(dry_run=False, max_results=MAX_RESULTS, query=DEFAULT_QUERY, 
                interval=DAEMON_INTERVAL, verbose=False):
@@ -1436,6 +1690,13 @@ Examples:
     ap.add_argument("--no-cot", action="store_true",
                     help="Disable chain-of-thought reasoning (optimize mode)")
     
+    ap.add_argument("--backfill-orders", action="store_true",
+                    help="Re-run order extraction on indexed emails and exit")
+    ap.add_argument("--backfill-limit", type=int, default=500,
+                    help="Max emails to process in backfill mode (default: 500)")
+    ap.add_argument("--no-llm", action="store_true",
+                    help="Use regex-only extraction during backfill (no LLM calls)")
+
     # Configuration options
     ap.add_argument("--credentials-path", type=str, default=CREDENTIALS_PATH,
                     help=f"Path to credentials directory (default: {CREDENTIALS_PATH})")
@@ -1480,6 +1741,9 @@ Examples:
             interval=args.interval,
             verbose=args.verbose
         )
+    elif args.backfill_orders:
+        count = backfill_orders(limit=args.backfill_limit, use_llm=not args.no_llm)
+        logger.info(f"Backfilled {count} shipment records")
     else:
         run_once(
             dry_run=args.dry_run,

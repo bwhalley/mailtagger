@@ -38,6 +38,7 @@ except ImportError:
 # Configuration
 PROMPT_DB_PATH = os.getenv("PROMPT_DB_PATH", "./data/prompts.db")
 EMAIL_INDEX_PATH = os.getenv("EMAIL_INDEX_PATH", "./data/emails.db")
+ORDER_INDEX_PATH = os.getenv("ORDER_INDEX_PATH", EMAIL_INDEX_PATH)
 DAEMON_PID_FILE = os.getenv("DAEMON_PID_FILE", "./data/daemon.pid")
 CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH", ".")
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -65,11 +66,16 @@ app.add_middleware(
 prompt_service = PromptService(PROMPT_DB_PATH)
 try:
     from email_index import EmailIndex
+    from order_index import OrderIndex
     email_index = EmailIndex(EMAIL_INDEX_PATH)
+    order_index = OrderIndex(ORDER_INDEX_PATH)
     EMAIL_INDEX_AVAILABLE = True
+    ORDER_INDEX_AVAILABLE = True
 except ImportError:
     email_index = None
+    order_index = None
     EMAIL_INDEX_AVAILABLE = False
+    ORDER_INDEX_AVAILABLE = False
 
 # Setup logging
 import logging
@@ -139,6 +145,10 @@ async def root():
             "GET /api/emails": "List indexed emails",
             "GET /api/emails/grouped": "Emails grouped by sender",
             "GET /api/search": "Search emails",
+            "GET /api/orders": "List shipments/orders",
+            "GET /api/orders/summary": "Shipment status summary",
+            "GET /api/orders/{id}": "Shipment detail",
+            "POST /api/orders/backfill": "Backfill shipments from indexed emails",
             "GET /api/senders": "List sender-level status/preferences",
             "PUT /api/senders/{sender_id}": "Update sender status/preferences",
             "POST /api/senders/backfill": "Backfill sender table from existing emails",
@@ -459,6 +469,134 @@ async def search_emails(
             priority=priority,
         )
         return {"success": True, "emails": emails, "count": len(emails)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Order / Shipment Tracking Endpoints
+# ============================================================================
+
+@app.get("/api/orders/summary")
+async def get_orders_summary():
+    """Get shipment counts by status."""
+    if not ORDER_INDEX_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Order index not available")
+    try:
+        summary = order_index.get_summary()
+        return {"success": True, "summary": summary}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/orders")
+async def list_orders(
+    status: Optional[str] = None,
+    active: bool = False,
+    recent_orders: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List shipments with optional filters."""
+    if not ORDER_INDEX_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Order index not available")
+    try:
+        if recent_orders:
+            shipments = order_index.list_recent_orders(limit=limit)
+        else:
+            shipments = order_index.list_shipments(
+                status=status,
+                active=active,
+                limit=limit,
+                offset=offset,
+            )
+        return {"success": True, "shipments": shipments, "count": len(shipments)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/orders/{shipment_id}")
+async def get_order(shipment_id: int):
+    """Get a single shipment with linked emails."""
+    if not ORDER_INDEX_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Order index not available")
+    try:
+        shipment = order_index.get_by_id(shipment_id)
+        if not shipment:
+            raise HTTPException(status_code=404, detail="Shipment not found")
+        return {"success": True, "shipment": shipment}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/orders/backfill")
+async def backfill_orders(limit: int = 500):
+    """Re-run order extraction on indexed emails."""
+    if not EMAIL_INDEX_AVAILABLE or not ORDER_INDEX_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Order index not available")
+    try:
+        from order_extraction import extract_order_data, should_extract
+        from carrier_rules import is_carrier_domain, match_carrier
+
+        processed = 0
+        with email_index.get_db() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM emails
+                WHERE classification IN ('receipt', 'order', 'shipping')
+                   OR sender_domain IS NOT NULL
+                ORDER BY received_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        for row in rows:
+            email = dict(row)
+            sender = email.get("sender") or ""
+            subject = email.get("subject") or ""
+            body = email.get("body_text") or email.get("snippet") or ""
+            sender_domain = email.get("sender_domain") or ""
+            classification = email.get("classification") or "none"
+
+            carrier_match = match_carrier(sender, subject, body)
+            is_carrier = is_carrier_domain(sender_domain) if sender_domain else False
+
+            if classification not in ("receipt", "order", "shipping") and not is_carrier and not carrier_match:
+                if not should_extract(False, classification, subject, body):
+                    continue
+
+            extracted = extract_order_data(
+                sender,
+                subject,
+                body,
+                carrier_hint=carrier_match.carrier_name if carrier_match else "",
+                category=classification,
+                use_llm=True,
+            )
+
+            order_index.upsert_shipment(
+                email_id=email.get("id"),
+                gmail_id=email.get("gmail_id"),
+                thread_id=email.get("thread_id"),
+                merchant=extracted.get("merchant", ""),
+                order_number=extracted.get("order_number", ""),
+                tracking_number=extracted.get("tracking_number", ""),
+                carrier=extracted.get("carrier", ""),
+                status=extracted.get("status", "unknown"),
+                amount=extracted.get("amount", ""),
+                currency=extracted.get("currency", ""),
+                estimated_delivery=extracted.get("estimated_delivery", ""),
+                tracking_url=extracted.get("tracking_url", ""),
+                item_summary=extracted.get("item_summary", ""),
+                received_at=email.get("received_at"),
+                subject=subject,
+            )
+            processed += 1
+
+        return {"success": True, "processed": processed}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
