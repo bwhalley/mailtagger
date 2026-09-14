@@ -75,6 +75,8 @@ class OrderIndex:
                 "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)"
             )
 
+            self._migrate_legacy_schema(conn)
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS shipments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,15 +94,18 @@ class OrderIndex:
                     FOREIGN KEY (order_id) REFERENCES orders(id)
                 )
             """)
+            shipment_cols = self._table_columns(conn, "shipments")
+            if "order_id" in shipment_cols:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_shipments_order ON shipments(order_id)"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_shipments_status ON shipments(status)"
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_shipments_order ON shipments(order_id)"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_shipments_brand ON shipments(brand_domain)"
-            )
+            if "brand_domain" in shipment_cols:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_shipments_brand ON shipments(brand_domain)"
+                )
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS order_emails (
@@ -129,8 +134,6 @@ class OrderIndex:
                     UNIQUE(shipment_id, gmail_id)
                 )
             """)
-
-            self._migrate_legacy_schema(conn)
 
     def _migrate_legacy_schema(self, conn: sqlite3.Connection):
         """Migrate monolithic shipments table to orders + shipments split."""
