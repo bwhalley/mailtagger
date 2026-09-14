@@ -72,43 +72,62 @@ export interface ApiSender {
   last_seen?: string;
 }
 
+export type OrderStatus = "ordered" | "confirmed" | "cancelled" | "unknown";
+
 export type ShipmentStatus =
-  | "ordered"
-  | "confirmed"
   | "shipped"
   | "in_transit"
   | "out_for_delivery"
   | "delivered"
   | "unknown";
 
-export interface ApiShipmentEmail {
+export interface ApiCommerceEmail {
   gmail_id?: string;
   subject?: string;
   received_at?: string;
+  source_type?: "brand" | "carrier";
+}
+
+export interface ApiOrder {
+  id: number;
+  order_number: string;
+  brand_domain: string;
+  status: OrderStatus;
+  first_email_at?: string | null;
+  last_email_at?: string | null;
+  linked_emails?: ApiCommerceEmail[];
+  shipments?: ApiShipment[];
 }
 
 export interface ApiShipment {
   id: number;
-  merchant: string;
+  tracking_number: string;
   carrier?: string | null;
-  tracking_number?: string | null;
   tracking_url?: string | null;
-  order_number?: string | null;
   status: ShipmentStatus;
+  source_type?: "brand" | "carrier";
+  brand_domain?: string | null;
+  order_id?: number | null;
+  order_number?: string | null;
+  order_brand_domain?: string | null;
   estimated_delivery?: string | null;
-  item_summary?: string | null;
-  amount?: string | null;
-  currency?: string | null;
-  last_email_at?: string | null;
-  thread_id?: string | null;
-  linked_emails?: ApiShipmentEmail[];
+  last_notification_at?: string | null;
+  notifications?: ApiCommerceEmail[];
 }
 
-export interface OrdersSummary {
-  by_status: Record<string, number>;
+export interface CommerceSummary {
+  orders_total: number;
+  orders_open: number;
+  shipments_total: number;
+  by_shipment_status: Record<string, number>;
   in_transit: number;
   out_for_delivery: number;
   arriving_this_week: number;
   delivered_recent: number;
-  total: number;
+  // backward compat
+  by_status?: Record<string, number>;
+  total?: number;
 }
+
+/** @deprecated use CommerceSummary */
+export type OrdersSummary = CommerceSummary;

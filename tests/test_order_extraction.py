@@ -27,7 +27,7 @@ class TestOrderExtraction(unittest.TestCase):
             "Out for delivery today",
             "Your package will arrive soon.",
         )
-        self.assertEqual(result["status"], "out_for_delivery")
+        self.assertEqual(result["shipment_status"], "out_for_delivery")
 
     def test_should_extract_transactional(self):
         self.assertTrue(

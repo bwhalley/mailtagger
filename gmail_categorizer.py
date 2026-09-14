@@ -71,8 +71,8 @@ try:
     from email_index import EmailIndex
     from prompt_service import PromptService
     from order_index import OrderIndex
-    from carrier_rules import match_carrier
-    from order_extraction import should_extract, extract_order_data
+    from carrier_rules import match_carrier, extract_domain, extract_domain_key, is_carrier_domain
+    from order_extraction import should_extract, extract_commerce_data
     EMAIL_INDEX_AVAILABLE = True
 except ImportError:
     EMAIL_INDEX_AVAILABLE = False
@@ -80,8 +80,11 @@ except ImportError:
     PromptService = None
     OrderIndex = None
     match_carrier = None
+    extract_domain = None
+    extract_domain_key = None
+    is_carrier_domain = None
     should_extract = None
-    extract_order_data = None
+    extract_commerce_data = None
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 
@@ -1064,6 +1067,60 @@ def _persist_to_index(
     )
 
 
+def _persist_commerce_objects(
+    email_row_id: int,
+    gmail_id: str,
+    thread_id: str,
+    sender: str,
+    subject: str,
+    body_text: str,
+    snippet: str,
+    received_at_iso: Optional[str],
+    category: str,
+    carrier_match,
+) -> None:
+    """Extract and persist order/shipment domain objects."""
+    if not EMAIL_INDEX_AVAILABLE or OrderIndex is None:
+        return
+    if not should_extract(
+        carrier_match is not None,
+        category,
+        subject,
+        snippet,
+    ):
+        return
+
+    carrier_hint = carrier_match.carrier_name if carrier_match else ""
+    sender_domain = extract_domain_key(extract_domain(sender))
+    is_carrier_sender = bool(carrier_match) or is_carrier_domain(sender_domain)
+    brand_domain = "" if is_carrier_sender else sender_domain
+
+    extracted = extract_commerce_data(
+        sender,
+        subject,
+        body_text or snippet,
+        carrier_hint=carrier_hint,
+        category=category,
+        use_dspy=USE_DSPY,
+        use_llm=True,
+    )
+
+    order_index = OrderIndex(ORDER_INDEX_PATH)
+    order_index.persist_commerce(
+        email_id=email_row_id,
+        gmail_id=gmail_id,
+        thread_id=thread_id,
+        sender=sender,
+        subject=subject,
+        received_at=received_at_iso,
+        category=category,
+        carrier_match=carrier_match,
+        extracted=extracted,
+        brand_domain=brand_domain,
+        is_carrier_sender=is_carrier_sender,
+    )
+
+
 def _persist_shipment(
     email_row_id: int,
     gmail_id: str,
@@ -1076,45 +1133,10 @@ def _persist_shipment(
     category: str,
     carrier_match,
 ) -> None:
-    """Extract and persist shipment data when applicable."""
-    if not EMAIL_INDEX_AVAILABLE or OrderIndex is None:
-        return
-    if not should_extract(
-        carrier_match is not None,
-        category,
-        subject,
-        snippet,
-    ):
-        return
-
-    carrier_hint = carrier_match.carrier_name if carrier_match else ""
-    extracted = extract_order_data(
-        sender,
-        subject,
-        body_text or snippet,
-        carrier_hint=carrier_hint,
-        category=category,
-        use_dspy=USE_DSPY,
-        use_llm=True,
-    )
-
-    order_index = OrderIndex(ORDER_INDEX_PATH)
-    order_index.upsert_shipment(
-        email_id=email_row_id,
-        gmail_id=gmail_id,
-        thread_id=thread_id,
-        merchant=extracted.get("merchant", ""),
-        order_number=extracted.get("order_number", ""),
-        tracking_number=extracted.get("tracking_number", ""),
-        carrier=extracted.get("carrier", "") or carrier_hint,
-        status=extracted.get("status", "unknown"),
-        amount=extracted.get("amount", ""),
-        currency=extracted.get("currency", ""),
-        estimated_delivery=extracted.get("estimated_delivery", ""),
-        tracking_url=extracted.get("tracking_url", ""),
-        item_summary=extracted.get("item_summary", ""),
-        received_at=received_at_iso,
-        subject=subject,
+    """Backward-compatible wrapper."""
+    _persist_commerce_objects(
+        email_row_id, gmail_id, thread_id, sender, subject,
+        body_text, snippet, received_at_iso, category, carrier_match,
     )
 
 
@@ -1362,7 +1384,7 @@ def backfill_orders(limit: int = 500, use_llm: bool = True) -> int:
         logger.error("Email index not available for backfill")
         return 0
 
-    from carrier_rules import is_carrier_domain, match_carrier
+    from carrier_rules import is_carrier_domain, match_carrier, extract_domain, extract_domain_key
 
     index = EmailIndex(EMAIL_INDEX_PATH)
     order_index = OrderIndex(ORDER_INDEX_PATH)
@@ -1385,7 +1407,7 @@ def backfill_orders(limit: int = 500, use_llm: bool = True) -> int:
         sender = email.get("sender") or ""
         subject = email.get("subject") or ""
         body = email.get("body_text") or email.get("snippet") or ""
-        sender_domain = email.get("sender_domain") or ""
+        sender_domain = email.get("domain_key") or email.get("sender_domain") or extract_domain_key(extract_domain(sender))
         classification = email.get("classification") or "none"
 
         carrier_match = match_carrier(sender, subject, body) if match_carrier else None
@@ -1395,7 +1417,10 @@ def backfill_orders(limit: int = 500, use_llm: bool = True) -> int:
             if not should_extract(False, classification, subject, body):
                 continue
 
-        extracted = extract_order_data(
+        is_carrier_sender = bool(carrier_match) or is_carrier
+        brand_domain = "" if is_carrier_sender else sender_domain
+
+        extracted = extract_commerce_data(
             sender,
             subject,
             body,
@@ -1405,22 +1430,18 @@ def backfill_orders(limit: int = 500, use_llm: bool = True) -> int:
             use_llm=use_llm,
         )
 
-        order_index.upsert_shipment(
+        order_index.persist_commerce(
             email_id=email.get("id"),
             gmail_id=email.get("gmail_id"),
             thread_id=email.get("thread_id"),
-            merchant=extracted.get("merchant", ""),
-            order_number=extracted.get("order_number", ""),
-            tracking_number=extracted.get("tracking_number", ""),
-            carrier=extracted.get("carrier", ""),
-            status=extracted.get("status", "unknown"),
-            amount=extracted.get("amount", ""),
-            currency=extracted.get("currency", ""),
-            estimated_delivery=extracted.get("estimated_delivery", ""),
-            tracking_url=extracted.get("tracking_url", ""),
-            item_summary=extracted.get("item_summary", ""),
-            received_at=email.get("received_at"),
+            sender=sender,
             subject=subject,
+            received_at=email.get("received_at"),
+            category=classification,
+            carrier_match=carrier_match,
+            extracted=extracted,
+            brand_domain=brand_domain,
+            is_carrier_sender=is_carrier_sender,
         )
         processed += 1
 

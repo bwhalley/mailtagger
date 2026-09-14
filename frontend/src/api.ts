@@ -1,10 +1,11 @@
 import type {
   ApiEmail,
   ApiSender,
+  ApiOrder,
   ApiShipment,
+  CommerceSummary,
   DashboardSummary,
   GmailStatus,
-  OrdersSummary,
   SenderStatus
 } from "./types";
 
@@ -126,19 +127,23 @@ export async function getSenderRecentEmails(senderId: number, limit = 3): Promis
   return response.emails;
 }
 
-export async function getOrdersSummary(): Promise<OrdersSummary> {
-  const response = await requestJson<{ success: boolean; summary: OrdersSummary }>(
-    "/api/orders/summary"
+export async function getCommerceSummary(): Promise<CommerceSummary> {
+  const response = await requestJson<{ success: boolean; summary: CommerceSummary }>(
+    "/api/commerce/summary"
   );
   if (!response.success || !response.summary) {
-    throw new Error("Orders summary unavailable");
+    throw new Error("Commerce summary unavailable");
   }
   return response.summary;
 }
 
+export async function getOrdersSummary(): Promise<CommerceSummary> {
+  return getCommerceSummary();
+}
+
 export async function getActiveShipments(limit = 50): Promise<ApiShipment[]> {
   const response = await requestJson<{ success: boolean; shipments: ApiShipment[] }>(
-    `/api/orders?active=true&limit=${limit}`
+    `/api/shipments?active=true&limit=${limit}`
   );
   if (!response.success || !response.shipments) {
     return [];
@@ -151,7 +156,7 @@ export async function getShipmentsByStatus(
   limit = 50
 ): Promise<ApiShipment[]> {
   const response = await requestJson<{ success: boolean; shipments: ApiShipment[] }>(
-    `/api/orders?status=${encodeURIComponent(status)}&limit=${limit}`
+    `/api/shipments?status=${encodeURIComponent(status)}&limit=${limit}`
   );
   if (!response.success || !response.shipments) {
     return [];
@@ -159,12 +164,22 @@ export async function getShipmentsByStatus(
   return response.shipments;
 }
 
-export async function getRecentOrders(limit = 20): Promise<ApiShipment[]> {
-  const response = await requestJson<{ success: boolean; shipments: ApiShipment[] }>(
-    `/api/orders?recent_orders=true&limit=${limit}`
+export async function getOpenOrders(limit = 20): Promise<ApiOrder[]> {
+  const response = await requestJson<{ success: boolean; orders: ApiOrder[] }>(
+    `/api/orders?without_shipment=true&limit=${limit}`
   );
-  if (!response.success || !response.shipments) {
+  if (!response.success || !response.orders) {
     return [];
   }
-  return response.shipments;
+  return response.orders;
+}
+
+export async function getRecentOrders(limit = 20): Promise<ApiOrder[]> {
+  const response = await requestJson<{ success: boolean; orders: ApiOrder[] }>(
+    `/api/orders?limit=${limit}`
+  );
+  if (!response.success || !response.orders) {
+    return [];
+  }
+  return response.orders;
 }

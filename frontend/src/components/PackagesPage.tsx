@@ -1,24 +1,28 @@
-import { Package, RefreshCw } from "lucide-react";
+import { Package, RefreshCw, ShoppingBag } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
+  getCommerceSummary,
+  getOpenOrders,
   getActiveShipments,
-  getOrdersSummary,
-  getRecentOrders,
   getShipmentsByStatus
 } from "../api";
-import type { ApiShipment, OrdersSummary } from "../types";
+import type { ApiOrder, ApiShipment, CommerceSummary } from "../types";
+import { OrderCard } from "./OrderCard";
 import { ShipmentCard } from "./ShipmentCard";
 
 interface PackagesPageProps {
   onNavigate: (path: string) => void;
 }
 
+type Tab = "shipments" | "orders";
+
 export function PackagesPage({ onNavigate }: PackagesPageProps) {
-  const [summary, setSummary] = useState<OrdersSummary | null>(null);
+  const [tab, setTab] = useState<Tab>("shipments");
+  const [summary, setSummary] = useState<CommerceSummary | null>(null);
   const [outForDelivery, setOutForDelivery] = useState<ApiShipment[]>([]);
   const [inTransit, setInTransit] = useState<ApiShipment[]>([]);
-  const [recentOrders, setRecentOrders] = useState<ApiShipment[]>([]);
   const [delivered, setDelivered] = useState<ApiShipment[]>([]);
+  const [openOrders, setOpenOrders] = useState<ApiOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,21 +30,20 @@ export function PackagesPage({ onNavigate }: PackagesPageProps) {
     setLoading(true);
     setError(null);
     try {
-      const [summaryData, ood, active, recent, deliveredList] = await Promise.all([
-        getOrdersSummary(),
+      const [summaryData, ood, active, deliveredList, orders] = await Promise.all([
+        getCommerceSummary(),
         getShipmentsByStatus("out_for_delivery", 20),
         getActiveShipments(50),
-        getRecentOrders(20),
-        getShipmentsByStatus("delivered", 15)
+        getShipmentsByStatus("delivered", 15),
+        getOpenOrders(20)
       ]);
       setSummary(summaryData);
       setOutForDelivery(ood);
-      const inTransitFiltered = active.filter(
-        (s) => s.status === "shipped" || s.status === "in_transit"
+      setInTransit(
+        active.filter((s) => s.status === "shipped" || s.status === "in_transit")
       );
-      setInTransit(inTransitFiltered);
-      setRecentOrders(recent);
       setDelivered(deliveredList);
+      setOpenOrders(orders);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load packages.");
     } finally {
@@ -65,7 +68,7 @@ export function PackagesPage({ onNavigate }: PackagesPageProps) {
               Inbox
             </button>
             <Package className="h-5 w-5 text-primary" />
-            <h1 className="font-display text-lg font-semibold">Packages</h1>
+            <h1 className="font-display text-lg font-semibold">Commerce</h1>
           </div>
           <button
             type="button"
@@ -93,9 +96,9 @@ export function PackagesPage({ onNavigate }: PackagesPageProps) {
             </p>
           </div>
           <div className="rounded-lg border border-border bg-card p-4 shadow-sm">
-            <p className="text-xs uppercase tracking-wide text-muted-foreground">Arriving this week</p>
+            <p className="text-xs uppercase tracking-wide text-muted-foreground">Open orders</p>
             <p className="mt-2 text-2xl font-display font-semibold">
-              {summary?.arriving_this_week ?? "-"}
+              {summary?.orders_open ?? "-"}
             </p>
           </div>
           <div className="rounded-lg border border-border bg-card p-4 shadow-sm">
@@ -106,6 +109,33 @@ export function PackagesPage({ onNavigate }: PackagesPageProps) {
           </div>
         </section>
 
+        <div className="mb-4 flex gap-2">
+          <button
+            type="button"
+            onClick={() => setTab("shipments")}
+            className={`inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium ${
+              tab === "shipments"
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-muted-foreground"
+            }`}
+          >
+            <Package className="h-3.5 w-3.5" />
+            Shipments
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("orders")}
+            className={`inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium ${
+              tab === "orders"
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted text-muted-foreground"
+            }`}
+          >
+            <ShoppingBag className="h-3.5 w-3.5" />
+            Orders
+          </button>
+        </div>
+
         {error && (
           <div className="mb-4 rounded-md border border-lane-urgent/30 bg-lane-urgent-soft px-3 py-2 text-sm">
             {error}
@@ -114,9 +144,9 @@ export function PackagesPage({ onNavigate }: PackagesPageProps) {
 
         {loading ? (
           <div className="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground">
-            Loading packages...
+            Loading...
           </div>
-        ) : (
+        ) : tab === "shipments" ? (
           <div className="space-y-6">
             {outForDelivery.length > 0 && (
               <section className="space-y-3">
@@ -128,7 +158,6 @@ export function PackagesPage({ onNavigate }: PackagesPageProps) {
                 </div>
               </section>
             )}
-
             {inTransit.length > 0 && (
               <section className="space-y-3">
                 <h2 className="font-display text-base font-semibold">In transit</h2>
@@ -139,21 +168,6 @@ export function PackagesPage({ onNavigate }: PackagesPageProps) {
                 </div>
               </section>
             )}
-
-            {recentOrders.length > 0 && (
-              <section className="space-y-3">
-                <h2 className="font-display text-base font-semibold">Recent orders</h2>
-                <p className="text-sm text-muted-foreground">
-                  Confirmed orders not yet shipped.
-                </p>
-                <div className="space-y-3">
-                  {recentOrders.map((shipment) => (
-                    <ShipmentCard key={shipment.id} shipment={shipment} />
-                  ))}
-                </div>
-              </section>
-            )}
-
             {delivered.length > 0 && (
               <section className="space-y-3">
                 <h2 className="font-display text-base font-semibold">Recently delivered</h2>
@@ -164,16 +178,22 @@ export function PackagesPage({ onNavigate }: PackagesPageProps) {
                 </div>
               </section>
             )}
-
-            {outForDelivery.length === 0 &&
-              inTransit.length === 0 &&
-              recentOrders.length === 0 &&
-              delivered.length === 0 && (
-                <div className="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground">
-                  No packages tracked yet. Order and shipping emails will appear here after the
-                  daemon processes them.
-                </div>
-              )}
+            {outForDelivery.length === 0 && inTransit.length === 0 && delivered.length === 0 && (
+              <div className="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground">
+                No shipments tracked yet.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <h2 className="font-display text-base font-semibold">Orders awaiting shipment</h2>
+            {openOrders.length === 0 ? (
+              <div className="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground">
+                No open orders without shipments.
+              </div>
+            ) : (
+              openOrders.map((order) => <OrderCard key={order.id} order={order} />)
+            )}
           </div>
         )}
       </main>

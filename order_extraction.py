@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Extract structured order/shipment data from transactional emails.
-Uses regex fallbacks plus optional LLM/DSPy extraction.
+Extract structured order and shipment data from transactional emails.
 """
 
 import json
@@ -28,18 +27,15 @@ EXTRACTION_PROMPT = """Extract order and shipment details from this email.
 Respond with ONLY valid JSON, no other text.
 Format:
 {
-  "merchant": "store or shipper name",
   "order_number": "",
   "tracking_number": "",
   "carrier": "",
-  "status": "ordered|confirmed|shipped|in_transit|out_for_delivery|delivered|unknown",
-  "amount": "",
-  "currency": "",
+  "order_status": "ordered|confirmed|cancelled|unknown",
+  "shipment_status": "shipped|in_transit|out_for_delivery|delivered|unknown",
   "estimated_delivery": "",
-  "tracking_url": "",
-  "item_summary": ""
+  "tracking_url": ""
 }
-Use empty strings for unknown fields. Infer status from email content."""
+Use empty strings for unknown fields."""
 
 UPS_PATTERN = re.compile(r"\b(1Z[0-9A-Z]{16})\b", re.IGNORECASE)
 USPS_PATTERN = re.compile(r"\b(9[0-9]{20,26})\b")
@@ -61,13 +57,29 @@ ORDER_NUMBER_PATTERN = re.compile(
 _dspy_extractor = None
 
 
+def normalize_tracking_number(raw: str) -> str:
+    if not raw:
+        return ""
+    normalized = re.sub(r"[\s\-]", "", raw.strip()).upper()
+    if len(normalized) < 8:
+        return ""
+    if len(set(normalized)) == 1:
+        return ""
+    return normalized
+
+
+def normalize_order_number(raw: str) -> str:
+    if not raw:
+        return ""
+    return re.sub(r"\s+", "", raw.strip()).upper()
+
+
 def should_extract(
     carrier_match: bool,
     category: str,
     subject: str,
     snippet: str,
 ) -> bool:
-    """Return True if this email should run order extraction."""
     if carrier_match:
         return True
     if category in ("receipt", "order", "shipping"):
@@ -76,51 +88,63 @@ def should_extract(
     return any(kw in content for kw in TRANSACTIONAL_KEYWORDS)
 
 
-def _empty_extraction() -> Dict[str, str]:
+def _empty_commerce() -> Dict[str, str]:
     return {
-        "merchant": "",
         "order_number": "",
         "tracking_number": "",
         "carrier": "",
-        "status": "unknown",
-        "amount": "",
-        "currency": "",
+        "order_status": "unknown",
+        "shipment_status": "unknown",
         "estimated_delivery": "",
         "tracking_url": "",
-        "item_summary": "",
     }
 
 
+def _map_legacy_status(status: str, category: str) -> Dict[str, str]:
+    status = (status or "unknown").lower()
+    order_status = "unknown"
+    shipment_status = "unknown"
+    if status in ("ordered", "confirmed", "cancelled"):
+        order_status = status
+    elif status in ("shipped", "in_transit", "out_for_delivery", "delivered"):
+        shipment_status = status
+    elif status == "unknown":
+        if category in ("receipt", "order"):
+            order_status = "confirmed"
+        elif category == "shipping":
+            shipment_status = "shipped"
+    return {"order_status": order_status, "shipment_status": shipment_status}
+
+
 def extract_with_regex(subject: str, body: str, carrier_hint: str = "") -> Dict[str, str]:
-    """Regex-based extraction for tracking numbers, URLs, order numbers."""
-    result = _empty_extraction()
+    result = _empty_commerce()
     content = f"{subject}\n{body}"
 
     ups = UPS_PATTERN.search(content)
     if ups:
-        result["tracking_number"] = ups.group(1).upper()
+        result["tracking_number"] = normalize_tracking_number(ups.group(1))
         result["carrier"] = result["carrier"] or "UPS"
 
     if not result["tracking_number"]:
         usps = USPS_PATTERN.search(content)
         if usps:
-            result["tracking_number"] = usps.group(1)
+            result["tracking_number"] = normalize_tracking_number(usps.group(1))
             result["carrier"] = result["carrier"] or "USPS"
 
     if not result["tracking_number"]:
         label_match = TRACKING_LABEL_PATTERN.search(content)
         if label_match:
-            result["tracking_number"] = label_match.group(1).upper()
+            result["tracking_number"] = normalize_tracking_number(label_match.group(1))
 
     if not result["tracking_number"] and "fedex" in content.lower():
         fedex = FEDEX_PATTERN.search(content)
         if fedex:
-            result["tracking_number"] = fedex.group(1)
+            result["tracking_number"] = normalize_tracking_number(fedex.group(1))
             result["carrier"] = result["carrier"] or "FedEx"
 
     order_match = ORDER_NUMBER_PATTERN.search(content)
     if order_match:
-        result["order_number"] = order_match.group(1)
+        result["order_number"] = normalize_order_number(order_match.group(1))
 
     url_match = TRACKING_URL_PATTERN.search(content)
     if url_match:
@@ -131,17 +155,17 @@ def extract_with_regex(subject: str, body: str, carrier_hint: str = "") -> Dict[
 
     content_lower = content.lower()
     if "delivered" in content_lower:
-        result["status"] = "delivered"
+        result["shipment_status"] = "delivered"
     elif "out for delivery" in content_lower:
-        result["status"] = "out_for_delivery"
+        result["shipment_status"] = "out_for_delivery"
     elif "in transit" in content_lower or "on the way" in content_lower:
-        result["status"] = "in_transit"
+        result["shipment_status"] = "in_transit"
     elif "shipped" in content_lower or "has shipped" in content_lower:
-        result["status"] = "shipped"
+        result["shipment_status"] = "shipped"
     elif "order confirm" in content_lower or "thank you for your order" in content_lower:
-        result["status"] = "confirmed"
+        result["order_status"] = "confirmed"
     elif "receipt" in content_lower or "invoice" in content_lower:
-        result["status"] = "confirmed"
+        result["order_status"] = "confirmed"
 
     return result
 
@@ -150,8 +174,11 @@ def _merge_extraction(base: Dict[str, str], llm: Dict[str, str]) -> Dict[str, st
     merged = dict(base)
     for key, value in llm.items():
         if value and str(value).strip() and str(value).strip().lower() not in ("unknown", "n/a"):
-            if not merged.get(key) or key in ("status", "merchant", "item_summary"):
-                merged[key] = str(value).strip()
+            merged[key] = str(value).strip()
+    if merged.get("tracking_number"):
+        merged["tracking_number"] = normalize_tracking_number(merged["tracking_number"])
+    if merged.get("order_number"):
+        merged["order_number"] = normalize_order_number(merged["order_number"])
     return merged
 
 
@@ -163,30 +190,22 @@ def _get_dspy_extractor():
     return _dspy_extractor
 
 
-def extract_with_llm(
-    sender: str,
-    subject: str,
-    body: str,
-    use_dspy: bool = False,
-) -> Dict[str, str]:
-    """LLM extraction via DSPy or OpenAI-compatible API."""
+def extract_with_llm(sender: str, subject: str, body: str, use_dspy: bool = False) -> Dict[str, str]:
     body_snippet = re.sub(r"\s+", " ", body).strip()[:6000]
 
     if use_dspy and DSPY_AVAILABLE:
         try:
             extractor = _get_dspy_extractor()
             result = extractor(sender=sender, subject=subject, body=body_snippet)
+            mapped = _map_legacy_status(result.status, "shipping")
             return {
-                "merchant": result.merchant or "",
-                "order_number": result.order_number or "",
-                "tracking_number": result.tracking_number or "",
+                "order_number": normalize_order_number(result.order_number or ""),
+                "tracking_number": normalize_tracking_number(result.tracking_number or ""),
                 "carrier": result.carrier or "",
-                "status": result.status or "unknown",
-                "amount": result.amount or "",
-                "currency": result.currency or "",
+                "order_status": mapped["order_status"],
+                "shipment_status": mapped["shipment_status"] if result.tracking_number else "unknown",
                 "estimated_delivery": result.estimated_delivery or "",
                 "tracking_url": result.tracking_url or "",
-                "item_summary": result.item_summary or "",
             }
         except Exception:
             pass
@@ -209,7 +228,7 @@ def extract_with_llm(
         import requests
         api_key = os.getenv("OPENAI_API_KEY", "")
         if not api_key:
-            return _empty_extraction()
+            return _empty_commerce()
         url = os.getenv("OPENAI_URL", "https://api.openai.com/v1/chat/completions")
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         headers = {
@@ -230,18 +249,48 @@ def extract_with_llm(
         timeout = float(os.getenv("OPENAI_TIMEOUT", "45"))
         r = requests.post(url, headers=headers, json=payload, timeout=timeout)
         r.raise_for_status()
-        data = r.json()
-        content = data["choices"][0]["message"]["content"]
+        content = r.json()["choices"][0]["message"]["content"]
         parsed = json.loads(content)
-        out = _empty_extraction()
+        out = _empty_commerce()
         for key in out:
             if key in parsed and parsed[key]:
                 out[key] = str(parsed[key]).strip()
+        if out.get("tracking_number"):
+            out["tracking_number"] = normalize_tracking_number(out["tracking_number"])
+        if out.get("order_number"):
+            out["order_number"] = normalize_order_number(out["order_number"])
         return out
     except Exception:
-        return _empty_extraction()
+        return _empty_commerce()
 
 
+def extract_commerce_data(
+    sender: str,
+    subject: str,
+    body: str,
+    *,
+    carrier_hint: str = "",
+    category: str = "none",
+    use_dspy: bool = False,
+    use_llm: bool = True,
+) -> Dict[str, str]:
+    regex_data = extract_with_regex(subject, body, carrier_hint=carrier_hint)
+
+    if use_llm:
+        llm_data = extract_with_llm(sender, subject, body, use_dspy=use_dspy)
+        merged = _merge_extraction(regex_data, llm_data)
+    else:
+        merged = regex_data
+
+    if category in ("receipt", "order") and merged["order_status"] == "unknown":
+        merged["order_status"] = "confirmed"
+    if category == "shipping" and merged["shipment_status"] == "unknown" and merged["tracking_number"]:
+        merged["shipment_status"] = "shipped"
+
+    return merged
+
+
+# Backward compatibility
 def extract_order_data(
     sender: str,
     subject: str,
@@ -252,37 +301,25 @@ def extract_order_data(
     use_dspy: bool = False,
     use_llm: bool = True,
 ) -> Dict[str, str]:
-    """
-    Full extraction pipeline: regex first, then optional LLM merge.
-    """
-    regex_data = extract_with_regex(subject, body, carrier_hint=carrier_hint)
-
-    if not use_llm:
-        if not regex_data["merchant"] and sender:
-            domain_match = re.search(r"@([\w.-]+)", sender)
-            if domain_match:
-                regex_data["merchant"] = domain_match.group(1).split(".")[0].title()
-        if category == "receipt" and regex_data["status"] == "unknown":
-            regex_data["status"] = "confirmed"
-        elif category == "order" and regex_data["status"] == "unknown":
-            regex_data["status"] = "confirmed"
-        elif category == "shipping" and regex_data["status"] == "unknown":
-            regex_data["status"] = "shipped"
-        return regex_data
-
-    llm_data = extract_with_llm(sender, subject, body, use_dspy=use_dspy)
-    merged = _merge_extraction(regex_data, llm_data)
-
-    if not merged["merchant"] and sender:
-        domain_match = re.search(r"@([\w.-]+)", sender)
-        if domain_match:
-            merged["merchant"] = domain_match.group(1).split(".")[0].title()
-
-    if category == "receipt" and merged["status"] == "unknown":
-        merged["status"] = "confirmed"
-    elif category == "order" and merged["status"] == "unknown":
-        merged["status"] = "confirmed"
-    elif category == "shipping" and merged["status"] == "unknown" and merged["tracking_number"]:
-        merged["status"] = "shipped"
-
-    return merged
+    data = extract_commerce_data(
+        sender, subject, body,
+        carrier_hint=carrier_hint,
+        category=category,
+        use_dspy=use_dspy,
+        use_llm=use_llm,
+    )
+    status = data.get("shipment_status") if data.get("tracking_number") else data.get("order_status")
+    return {
+        "merchant": "",
+        "order_number": data.get("order_number", ""),
+        "tracking_number": data.get("tracking_number", ""),
+        "carrier": data.get("carrier", ""),
+        "status": status or "unknown",
+        "amount": "",
+        "currency": "",
+        "estimated_delivery": data.get("estimated_delivery", ""),
+        "tracking_url": data.get("tracking_url", ""),
+        "item_summary": "",
+        "order_status": data.get("order_status", "unknown"),
+        "shipment_status": data.get("shipment_status", "unknown"),
+    }
