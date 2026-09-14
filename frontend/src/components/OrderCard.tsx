@@ -1,6 +1,8 @@
 import { ChevronDown, ShoppingBag } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { getOrderDetail } from "../api";
 import type { ApiOrder } from "../types";
+import { CommerceEmailPreview } from "./CommerceEmailPreview";
 
 const statusLabels: Record<ApiOrder["status"], string> = {
   ordered: "Ordered",
@@ -27,6 +29,29 @@ interface OrderCardProps {
 
 export function OrderCard({ order }: OrderCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [detail, setDetail] = useState<ApiOrder | null>(null);
+  const [loadingEmails, setLoadingEmails] = useState(false);
+
+  useEffect(() => {
+    if (!expanded || detail) return;
+    let cancelled = false;
+    setLoadingEmails(true);
+    getOrderDetail(order.id)
+      .then((loaded) => {
+        if (!cancelled) setDetail(loaded);
+      })
+      .catch(() => {
+        if (!cancelled) setDetail(order);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingEmails(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, detail, order]);
+
+  const linkedEmails = detail?.linked_emails ?? order.linked_emails ?? [];
 
   return (
     <article className="rounded-lg border border-border bg-card text-card-foreground shadow-sm">
@@ -59,27 +84,21 @@ export function OrderCard({ order }: OrderCardProps) {
 
       {expanded && (
         <div className="border-t border-border px-4 py-3">
-          {(order.linked_emails ?? []).length > 0 && (
+          {loadingEmails ? (
+            <p className="mb-3 text-xs text-muted-foreground">Loading emails...</p>
+          ) : linkedEmails.length > 0 ? (
             <ul className="mb-3 space-y-1.5">
-              {(order.linked_emails ?? []).map((email, idx) => (
-                <li
-                  key={`${email.gmail_id ?? idx}`}
-                  className="rounded-md bg-muted/50 px-3 py-2 text-xs text-foreground/90"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="truncate font-medium">{email.subject || "(No subject)"}</span>
-                    <span className="shrink-0 text-muted-foreground">
-                      {formatRelative(email.received_at)}
-                    </span>
-                  </div>
-                </li>
+              {linkedEmails.map((email, idx) => (
+                <CommerceEmailPreview key={`${email.gmail_id ?? idx}`} email={email} />
               ))}
             </ul>
+          ) : (
+            <p className="mb-3 text-xs text-muted-foreground">No linked emails.</p>
           )}
-          {(order.shipments ?? []).length > 0 && (
+          {(detail?.shipments ?? order.shipments ?? []).length > 0 && (
             <p className="text-xs text-muted-foreground">
-              {order.shipments!.length} linked shipment
-              {order.shipments!.length === 1 ? "" : "s"}
+              {(detail?.shipments ?? order.shipments)!.length} linked shipment
+              {(detail?.shipments ?? order.shipments)!.length === 1 ? "" : "s"}
             </p>
           )}
         </div>

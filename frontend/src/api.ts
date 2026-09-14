@@ -183,3 +183,23 @@ export async function getRecentOrders(limit = 20): Promise<ApiOrder[]> {
   }
   return response.orders;
 }
+
+export async function getOrderDetail(orderId: number): Promise<ApiOrder> {
+  const response = await requestJson<{ success: boolean; order: ApiOrder }>(
+    `/api/orders/${orderId}`
+  );
+  if (!response.success || !response.order) {
+    throw new Error("Order not found");
+  }
+  return response.order;
+}
+
+export async function getShipmentDetail(shipmentId: number): Promise<ApiShipment> {
+  const response = await requestJson<{ success: boolean; shipment: ApiShipment }>(
+    `/api/shipments/${shipmentId}`
+  );
+  if (!response.success || !response.shipment) {
+    throw new Error("Shipment not found");
+  }
+  return response.shipment;
+}

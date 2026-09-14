@@ -557,19 +557,61 @@ class OrderIndex:
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         return dict(row) if row else {}
 
+    def _has_emails_table(self, conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='emails'"
+        ).fetchone()
+        return row is not None
+
+    def _fetch_order_emails(self, conn: sqlite3.Connection, order_id: int) -> List[Dict[str, Any]]:
+        if self._has_emails_table(conn):
+            query = """
+                SELECT oe.gmail_id, oe.subject, oe.received_at,
+                       COALESCE(e.snippet, '') AS snippet
+                FROM order_emails oe
+                LEFT JOIN emails e ON e.id = oe.email_id
+                    OR (oe.email_id IS NULL AND e.gmail_id = oe.gmail_id)
+                WHERE oe.order_id = ?
+                ORDER BY oe.received_at DESC
+            """
+        else:
+            query = """
+                SELECT gmail_id, subject, received_at, '' AS snippet
+                FROM order_emails
+                WHERE order_id = ?
+                ORDER BY received_at DESC
+            """
+        return [dict(r) for r in conn.execute(query, (order_id,)).fetchall()]
+
+    def _fetch_shipment_notifications(
+        self, conn: sqlite3.Connection, shipment_id: int
+    ) -> List[Dict[str, Any]]:
+        if self._has_emails_table(conn):
+            query = """
+                SELECT sn.gmail_id, sn.subject, sn.received_at, sn.source_type,
+                       COALESCE(e.snippet, '') AS snippet
+                FROM shipment_notifications sn
+                LEFT JOIN emails e ON e.id = sn.email_id
+                    OR (sn.email_id IS NULL AND e.gmail_id = sn.gmail_id)
+                WHERE sn.shipment_id = ?
+                ORDER BY sn.received_at DESC
+            """
+        else:
+            query = """
+                SELECT gmail_id, subject, received_at, source_type, '' AS snippet
+                FROM shipment_notifications
+                WHERE shipment_id = ?
+                ORDER BY received_at DESC
+            """
+        return [dict(r) for r in conn.execute(query, (shipment_id,)).fetchall()]
+
     def get_order_by_id(self, order_id: int) -> Optional[Dict[str, Any]]:
         with self.get_db() as conn:
             row = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
             if not row:
                 return None
             order = self._row_to_dict(row)
-            order["linked_emails"] = [
-                dict(r)
-                for r in conn.execute(
-                    "SELECT gmail_id, subject, received_at FROM order_emails WHERE order_id = ? ORDER BY received_at DESC",
-                    (order_id,),
-                ).fetchall()
-            ]
+            order["linked_emails"] = self._fetch_order_emails(conn, order_id)
             order["shipments"] = [
                 dict(r)
                 for r in conn.execute(
@@ -585,17 +627,7 @@ class OrderIndex:
             if not row:
                 return None
             shipment = self._row_to_dict(row)
-            shipment["notifications"] = [
-                dict(r)
-                for r in conn.execute(
-                    """
-                    SELECT gmail_id, subject, received_at, source_type
-                    FROM shipment_notifications WHERE shipment_id = ?
-                    ORDER BY received_at DESC
-                    """,
-                    (shipment_id,),
-                ).fetchall()
-            ]
+            shipment["notifications"] = self._fetch_shipment_notifications(conn, shipment_id)
             if shipment.get("order_id"):
                 order_row = conn.execute(
                     "SELECT order_number, brand_domain, status FROM orders WHERE id = ?",

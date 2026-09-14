@@ -1,6 +1,8 @@
 import { ChevronDown, ExternalLink, Package } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { getShipmentDetail } from "../api";
 import type { ApiShipment, ShipmentStatus } from "../types";
+import { CommerceEmailPreview } from "./CommerceEmailPreview";
 
 const statusLabels: Record<ShipmentStatus, string> = {
   shipped: "Shipped",
@@ -37,11 +39,34 @@ interface ShipmentCardProps {
 
 export function ShipmentCard({ shipment, highlight = false }: ShipmentCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [detail, setDetail] = useState<ApiShipment | null>(null);
+  const [loadingEmails, setLoadingEmails] = useState(false);
   const status = (shipment.status ?? "unknown") as ShipmentStatus;
   const displayName = useMemo(
     () => shipment.brand_domain || shipment.carrier || "Package",
     [shipment.brand_domain, shipment.carrier]
   );
+
+  useEffect(() => {
+    if (!expanded || detail) return;
+    let cancelled = false;
+    setLoadingEmails(true);
+    getShipmentDetail(shipment.id)
+      .then((loaded) => {
+        if (!cancelled) setDetail(loaded);
+      })
+      .catch(() => {
+        if (!cancelled) setDetail(shipment);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingEmails(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, detail, shipment]);
+
+  const notifications = detail?.notifications ?? shipment.notifications ?? [];
 
   const copyTracking = async () => {
     if (!shipment.tracking_number) return;
@@ -115,22 +140,20 @@ export function ShipmentCard({ shipment, highlight = false }: ShipmentCardProps)
 
       {expanded && (
         <div className="border-t border-border px-4 py-3">
-          {(shipment.notifications ?? []).length > 0 && (
+          {loadingEmails ? (
+            <p className="mb-3 text-xs text-muted-foreground">Loading emails...</p>
+          ) : notifications.length > 0 ? (
             <ul className="mb-3 space-y-1.5">
-              {(shipment.notifications ?? []).map((note, idx) => (
-                <li
+              {notifications.map((note, idx) => (
+                <CommerceEmailPreview
                   key={`${note.gmail_id ?? idx}`}
-                  className="rounded-md bg-muted/50 px-3 py-2 text-xs text-foreground/90"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="truncate font-medium">{note.subject || "(No subject)"}</span>
-                    <span className="shrink-0 text-muted-foreground">
-                      {note.source_type ?? "brand"} · {formatRelative(note.received_at)}
-                    </span>
-                  </div>
-                </li>
+                  email={note}
+                  meta={`${note.source_type ?? "brand"} · ${formatRelative(note.received_at)}`}
+                />
               ))}
             </ul>
+          ) : (
+            <p className="mb-3 text-xs text-muted-foreground">No notification emails.</p>
           )}
           {shipment.tracking_url && (
             <a

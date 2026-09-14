@@ -85,6 +85,7 @@ export interface ApiCommerceEmail {
   gmail_id?: string;
   subject?: string;
   received_at?: string;
+  snippet?: string | null;
   source_type?: "brand" | "carrier";
 }
 
